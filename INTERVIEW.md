@@ -3222,6 +3222,343 @@ GroupConsumer(
 
 ---
 
-**Document Version:** 7.0  
+# Task 9: Offset Management
+
+## Overview
+
+**What I built:** Persistent offset storage system using an internal __consumer_offsets topic with compaction, expiration, and robust offset reset strategies.
+
+**Motivation:** Consumer groups need durable offset storage. In-memory offsets are lost on restart. The __consumer_offsets topic provides Kafka-style persistent storage with automatic compaction and expiration.
+
+## Technical Implementation
+
+### 1. Internal Offset Topic (`offset_topic.py` - 415 lines)
+
+**Special compacted topic for offset storage:**
+
+```python
+class OffsetTopic:
+    INTERNAL_OFFSET_TOPIC = "__consumer_offsets"
+    OFFSET_TOPIC_NUM_PARTITIONS = 50  # Like Kafka
+    OFFSET_RETENTION_MS = 7 * 24 * 60 * 60 * 1000  # 7 days
+```
+
+**Key-Value Structure:**
+```
+Key: OffsetKey(group_id, topic, partition)
+Value: OffsetMetadata(offset, metadata, timestamps)
+```
+
+**Partitioning:**
+```python
+def _partition_for_key(self, key):
+    # Hash group_id so all offsets for a group go to same partition
+    group_hash = abs(hash(key.group_id))
+    return group_hash % num_partitions
+```
+
+**Why hash by group_id?** All offsets for a group stay together, enabling efficient fetch_all_offsets().
+
+**Interview talking point:** "Same design as Kafka's __consumer_offsets topic. 50 partitions provide parallelism while keeping group offsets co-located."
+
+### 2. Offset Commit Protocol
+
+**Commit flow:**
+```python
+def commit_offset(self, group_id, topic_partition, offset):
+    key = OffsetKey(group_id, topic, partition)
+    offset_metadata = OffsetMetadata(offset, metadata, timestamp)
+    
+    partition = hash(group_id) % 50
+    log = self._partition_logs[partition]
+    
+    log.append(
+        key=json.dumps(key.to_dict()).encode(),
+        value=json.dumps(offset_metadata.to_dict()).encode()
+    )
+```
+
+**Benefits:**
+- Durable storage (survives broker restart)
+- Atomic writes (append-only log)
+- Compacted (only latest offset kept)
+- Expired offsets automatically cleaned
+
+**Interview talking point:** "Offsets are just messages in a special topic. This leverages all the durability and replication guarantees of the log system itself."
+
+### 3. Offset Compaction
+
+**Problem:** Offset topic grows forever without compaction.
+
+**Solution:** Log compaction keeps only latest offset per key.
+
+```python
+# Before compaction:
+(group-1, topic-1, p0) -> offset 100
+(group-1, topic-1, p0) -> offset 200
+(group-1, topic-1, p0) -> offset 300
+
+# After compaction:
+(group-1, topic-1, p0) -> offset 300  # Only latest
+```
+
+**Compaction strategy:**
+- Compact old segments (not active segment)
+- Keep only latest value per key
+- Remove tombstone records after grace period
+
+**Interview talking point:** "Compaction is essential for offset topic. Without it, topic grows unbounded. With compaction, it stays proportional to active consumer groups."
+
+### 4. Offset Expiration
+
+**Expired offsets are garbage collected:**
+
+```python
+class OffsetMetadata:
+    expire_timestamp = commit_timestamp + OFFSET_RETENTION_MS
+    
+    def is_expired(self, current_time_ms):
+        return current_time_ms > self.expire_timestamp
+```
+
+**Why expiration?**
+- Old consumer groups no longer active
+- Prevents offset topic from growing forever
+- 7-day retention is standard (configurable)
+
+**Interview talking point:** "Offset expiration handles the case where consumer groups are abandoned. After 7 days of no commits, offsets are considered stale and removed during compaction."
+
+### 5. Offset Reset Strategies
+
+**Three strategies for missing offsets:**
+
+**Earliest:**
+```python
+# Start from offset 0 (reprocess everything)
+offset = get_beginning_offset(topic_partition)
+```
+
+**Latest:**
+```python
+# Start from current end (skip historical data)
+offset = get_end_offset(topic_partition)
+```
+
+**None:**
+```python
+# Raise error (require explicit offset)
+raise ValueError("No committed offset and auto.offset.reset is 'none'")
+```
+
+**Configuration:**
+```python
+Consumer(
+    auto_offset_reset="earliest",  # or "latest" or "none"
+)
+```
+
+**Interview talking point:** "Reset strategies handle the cold-start problem. Earliest for backfill, latest for real-time, none for strict control."
+
+### 6. Rebalance Offset Handling
+
+**Pre-rebalance commit:**
+```python
+async def prepare_for_rebalance(group_id, current_positions):
+    # Commit all current positions before rebalance
+    for tp, offset in current_positions.items():
+        offset_topic.commit_offset(group_id, tp, offset)
+```
+
+**Post-rebalance fetch:**
+```python
+async def fetch_offsets_after_rebalance(group_id, assigned_partitions):
+    starting_offsets = {}
+    
+    for tp in assigned_partitions:
+        offset_metadata = offset_topic.fetch_offset(group_id, tp)
+        
+        if offset_metadata:
+            starting_offsets[tp] = offset_metadata.offset
+        else:
+            # Apply reset strategy
+            starting_offsets[tp] = reset_handler.reset_offset(tp)
+    
+    return starting_offsets
+```
+
+**Why important?** Ensures consumers resume from correct position after rebalance.
+
+**Interview talking point:** "Rebalancing is where offset management shines. Pre-commit ensures no data loss. Post-fetch ensures consumers resume from correct position. Reset strategy handles new partitions."
+
+### 7. Offset Commit During Rebalance (Edge Case)
+
+**Problem:** What if consumer commits while rebalance is in progress?
+
+**Solution:** Allow commit but log warning.
+
+```python
+async def handle_offset_commit_during_rebalance(group_id, tp, offset):
+    try:
+        offset_topic.commit_offset(group_id, tp, offset)
+        logger.warning("Committed offset during rebalance")
+        return True
+    except Exception as e:
+        logger.error("Commit during rebalance failed")
+        return False
+```
+
+**Why allow it?** Consumer might be finishing processing before joining rebalance.
+
+**Interview talking point:** "This is a race condition edge case. We allow the commit to succeed because it's better to have an extra commit than lose progress."
+
+### 8. Tombstone Records (Deletion)
+
+**Delete group offsets with tombstones:**
+
+```python
+def delete_group_offsets(self, group_id):
+    for tp in group_partitions:
+        key_bytes = json.dumps(key.to_dict()).encode()
+        log.append(key=key_bytes, value=b"")  # Empty value = tombstone
+```
+
+**Compaction removes tombstones** after grace period.
+
+**Interview talking point:** "Tombstones are the standard way to delete from compacted logs. Kafka uses the same approach for offset deletion."
+
+## Design Deep Dives
+
+### Why Internal Topic Instead of Database?
+
+**Question:** Why use an internal topic instead of a database?
+
+**Answer:**
+
+**Internal Topic (our approach):**
+- Leverages existing log infrastructure
+- Gets replication for free (Phase 2)
+- Same durability guarantees as data
+- No additional dependency
+
+**Database (alternative):**
+- Simpler query patterns
+- Transactional updates
+- But: Another system to maintain
+- But: Different consistency model
+
+**Real-world:** Kafka uses internal topic. We follow the same pattern.
+
+### Offset Commit Frequency Trade-off
+
+**Question:** How often should consumers commit offsets?
+
+**Answer:**
+
+**Frequent commits (every message):**
+- Pro: Minimal reprocessing on restart
+- Con: High overhead (network + writes)
+
+**Infrequent commits (every 5 seconds):**
+- Pro: Lower overhead
+- Con: More reprocessing on restart
+
+**Batched commits (after N messages):**
+- Pro: Balanced trade-off
+- Con: Tuning required
+
+**Our default:** Auto-commit every 5 seconds (configurable).
+
+**Interview talking point:** "It's a classic durability vs performance trade-off. Auto-commit every 5 seconds balances both. For critical data, use manual commit after processing."
+
+### At-Least-Once vs Duplicates
+
+**Question:** How do you handle duplicates with at-least-once?
+
+**Answer:**
+
+**At-least-once:** Commit after processing.
+- Crash before commit → reprocess
+- Produces duplicates
+
+**Solutions:**
+1. **Idempotent processing:** Same message processed twice = same result
+2. **Deduplication:** Track processed message IDs
+3. **Exactly-once** (Phase 3): Transactional commit
+
+**Interview talking point:** "At-least-once is standard for consumer groups. Applications must handle duplicates. The alternative (at-most-once) risks data loss."
+
+### Committed Offset But Processing Failed
+
+**Problem:** Consumer commits offset but processing fails afterward.
+
+```
+1. Fetch messages (offsets 100-110)
+2. Commit offset 110
+3. Process messages
+4. Crash during processing!
+
+Result: Offsets 100-110 lost (at-most-once)
+```
+
+**Solution:** Commit AFTER processing (at-least-once).
+
+```
+1. Fetch messages (offsets 100-110)
+2. Process messages
+3. Commit offset 110
+4. Crash here? OK, will reprocess
+
+Result: May reprocess (duplicates) but no data loss
+```
+
+**Interview talking point:** "This is why manual commit after processing is the gold standard. Auto-commit risks data loss if crash happens between commit and processing."
+
+## Interview Questions & Answers
+
+### Q1: Explain the __consumer_offsets topic.
+
+**Answer:** "It's a special internal topic with 50 partitions that stores committed offsets for all consumer groups. Key is (group_id, topic, partition), value is (offset, metadata, timestamp). The topic is compacted so only the latest offset per key is kept. Hash partitioning on group_id ensures all offsets for a group go to the same partition."
+
+### Q2: How does offset compaction work?
+
+**Answer:** "Log compaction keeps only the latest value per key. For offsets, this means keeping only the most recent commit per (group, topic, partition). Old offset commits are discarded during compaction. This prevents the offset topic from growing unbounded while preserving all active consumer group positions."
+
+### Q3: What happens when a consumer has no committed offset?
+
+**Answer:** "We apply the auto.offset.reset strategy. 'earliest' starts from offset 0 (reprocess all data). 'latest' starts from current log end (skip historical data). 'none' raises an exception (requires explicit offset). This is configurable per consumer group."
+
+### Q4: How do offsets work during rebalancing?
+
+**Answer:** "Before rebalance, consumers commit their current positions. After rebalance, new consumers fetch committed offsets for their assigned partitions. If no committed offset exists, we apply the reset strategy. This ensures consumers always start from a valid position."
+
+### Q5: Why hash by group_id for partitioning?
+
+**Answer:** "Hashing by group_id ensures all offsets for a consumer group go to the same partition. This enables efficient fetch_all_offsets() operations - we only need to scan one partition instead of all 50. It also keeps related data together for better compaction efficiency."
+
+### Q6: How do you handle offset commit failures?
+
+**Answer:** "If commit fails (network issue, broker down), consumer continues with old committed offset. On restart, it reprocesses from the last successful commit. This causes duplicates but ensures no data loss (at-least-once semantics). Applications must handle duplicate processing idempotently."
+
+## Key Takeaways
+
+1. **Internal topic provides durability** - offsets survive broker restart
+2. **Compaction prevents unbounded growth** - only latest offset kept
+3. **Expiration cleans up stale groups** - 7-day retention default
+4. **Reset strategies handle cold start** - earliest, latest, or none
+5. **Rebalance coordination critical** - pre-commit and post-fetch
+6. **At-least-once requires idempotency** - duplicates are inevitable
+7. **Tombstones enable deletion** - standard compacted log pattern
+8. **Hash by group for locality** - all group offsets in one partition
+
+## Comparable Systems
+
+- **Kafka:** Uses identical __consumer_offsets topic design
+- **Pulsar:** Uses BookKeeper for offset storage (different approach)
+- **RabbitMQ:** Queue-based, no offset concept
+- **AWS Kinesis:** DynamoDB for checkpoint storage
+
+---
+
+**Document Version:** 8.0  
 **Last Updated:** January 15, 2026  
 **Next Update:** After Phase 2 (replication and consensus)
