@@ -4431,6 +4431,682 @@ config = ReplicationConfig(
 
 ---
 
-**Document Version:** 10.0  
+# Task 12: Raft Consensus Algorithm
+
+## What I Built
+
+Implemented **Raft consensus algorithm** for distributed leader election and coordination - the foundation for fault-tolerant cluster management without split-brain scenarios.
+
+### Components
+
+#### 1. State Machine (`state.py`)
+```
+RaftState: Follower, Candidate, Leader
+
+PersistentState (survives crashes)
+├── current_term: Latest term seen
+├── voted_for: Candidate voted for in current term
+└── log: Raft command log
+
+VolatileState (recomputed on restart)
+├── commit_index: Highest committed entry
+└── last_applied: Highest applied entry
+
+LeaderState (only on leader)
+├── next_index: Next log index for each follower
+└── match_index: Highest replicated index per follower
+
+RaftStateMachine
+├── State transitions (Follower → Candidate → Leader)
+├── Election timeout handling
+├── Log entry management
+└── Persistent state save/load
+```
+
+#### 2. RPC Messages (`rpc.py`)
+```
+RequestVoteRequest
+├── term: Candidate's term
+├── candidate_id: Candidate ID
+├── last_log_index: Last log entry index
+└── last_log_term: Last log entry term
+
+RequestVoteResponse
+├── term: Current term
+└── vote_granted: True if granted
+
+AppendEntriesRequest (heartbeat + log replication)
+├── term: Leader's term
+├── leader_id: Leader ID
+├── prev_log_index: Previous entry index
+├── prev_log_term: Previous entry term
+├── entries: Log entries to replicate
+└── leader_commit: Leader's commit index
+
+AppendEntriesResponse
+├── term: Current term
+├── success: True if accepted
+└── match_index: Last matching index
+```
+
+#### 3. Raft Node (`node.py`)
+```
+RaftNode
+├── Leader election with voting
+├── Heartbeat protocol (50ms interval)
+├── Log replication to followers
+├── Commit index advancement
+├── Request handling (RequestVote, AppendEntries)
+└── Client API (propose command)
+```
+
+## Core Concepts
+
+### The Three States
+
+**Follower:**
+- Default state on startup
+- Responds to RPCs from candidates and leaders
+- Times out and becomes candidate if no heartbeat
+
+**Candidate:**
+- Requests votes from peers
+- Becomes leader if wins majority
+- Returns to follower if loses election
+
+**Leader:**
+- Handles all client requests
+- Replicates log to followers via AppendEntries
+- Sends periodic heartbeats to maintain authority
+
+### State Transition Diagram
+
+```
+    Follower
+       ↓ (election timeout)
+    Candidate
+       ↓ (receives majority votes)
+    Leader
+       
+    Any state → Follower (if discovers higher term)
+```
+
+### Term Numbers
+
+**What:** Logical clock dividing time into arbitrary periods.
+
+**Purpose:**
+- Detect stale leaders
+- Prevent split-brain
+- Ensure safety
+
+**Rules:**
+1. Each server maintains `currentTerm`
+2. Term increments when starting election
+3. If receive higher term → update and become follower
+4. If receive lower term → reject RPC
+
+**Example:**
+```
+Time →
+Term 1: [Leader A]
+Term 2: [Election] → [Leader B]
+Term 3: [Leader B continues]
+Term 4: [Election] → [Leader C]
+```
+
+### Leader Election
+
+**Process:**
+1. Follower times out (150-300ms randomized)
+2. Becomes candidate, increments term, votes for self
+3. Sends RequestVote RPC to all peers
+4. If receives majority votes → becomes leader
+5. If receives AppendEntries from valid leader → becomes follower
+6. If election timeout elapses → start new election
+
+**Majority Voting:**
+- Cluster of N nodes needs (N/2 + 1) votes
+- 3 nodes: need 2 votes
+- 5 nodes: need 3 votes
+- 7 nodes: need 4 votes
+
+**Why randomized timeouts?**
+Prevents split votes - if all nodes timeout simultaneously, they'd all become candidates and split votes endlessly.
+
+### Log Replication
+
+**Important:** Raft log ≠ commit log!
+
+- **Raft log:** Commands for cluster coordination (e.g., "assign partition X to broker Y")
+- **Commit log:** User data (messages in topics)
+
+**Replication Process:**
+1. Leader receives command from client
+2. Leader appends to local log
+3. Leader sends AppendEntries to followers
+4. Followers append to their logs, respond success
+5. Leader waits for majority
+6. Leader commits entry (applies to state machine)
+7. Leader includes commit index in next AppendEntries
+8. Followers commit up to leader's commit index
+
+### Log Matching Property
+
+**Guarantee:** If two logs contain an entry with same index and term, then:
+1. The entries are identical
+2. All preceding entries are identical
+
+**How it works:**
+- AppendEntries includes `prev_log_index` and `prev_log_term`
+- Follower only accepts if prev entry matches
+- If conflict → follower deletes conflicting entries
+- Leader retries with earlier index until match found
+
+### Safety Properties
+
+**1. Election Safety:** At most one leader per term.
+
+**2. Leader Append-Only:** Leader never overwrites or deletes entries.
+
+**3. Log Matching:** If two logs have same entry at same index, they're identical up to that point.
+
+**4. Leader Completeness:** If entry committed in term T, it appears in logs of all leaders for terms > T.
+
+**5. State Machine Safety:** If server has applied entry at index, no server will apply different entry at same index.
+
+## Design Decisions
+
+### 1. Randomized Election Timeout
+**Decision:** 150-300ms random timeout per node.
+
+**Rationale:** Prevents split votes in most cases.
+
+**Trade-off:** Slight delay to elect leader, but much more reliable.
+
+### 2. Persistent State
+**Decision:** Persist `currentTerm`, `votedFor`, `log` to disk.
+
+**Rationale:** Safety guarantees require this state survive crashes.
+
+**Implementation:** JSON file with atomic write (tmp → rename).
+
+### 3. Heartbeat Interval
+**Decision:** 50ms heartbeat interval (much less than election timeout).
+
+**Rationale:** Keep followers from timing out under normal operation.
+
+**Rule of thumb:** Heartbeat interval << election timeout.
+
+### 4. Log Index 1-Based
+**Decision:** Log indices start at 1 (not 0).
+
+**Rationale:** Matches Raft paper, makes "no previous entry" clearer (prev_index=0).
+
+### 5. Async Implementation
+**Decision:** All operations async with `asyncio`.
+
+**Rationale:** Handle multiple concurrent RPCs efficiently.
+
+## Deep End: The Hard Parts
+
+### 1. Split Votes (No Majority)
+
+**Problem:** Multiple candidates split the votes, no one wins.
+
+**Example:**
+```
+5-node cluster, election starts
+- Candidate A gets votes: 1 (self), 2
+- Candidate B gets votes: 3 (self), 4
+- Node 5 times out before voting
+Result: No one has majority (need 3 votes)
+```
+
+**Solution:**
+- Randomized election timeouts prevent this most of the time
+- If split vote occurs, nodes timeout and retry
+- Different timeout values mean one candidate likely starts first next time
+
+### 2. Network Partitions (Split-Brain)
+
+**Problem:** Network splits cluster into two groups.
+
+**Example:**
+```
+5-node cluster [1, 2, 3, 4, 5]
+Partition into [1, 2] and [3, 4, 5]
+
+Old leader 1 in minority partition → can't get majority → can't commit
+Nodes 3, 4, 5 → elect new leader → can commit
+```
+
+**Solution:**
+- Require majority for all operations
+- Minority partition can't make progress
+- Only majority partition has new leader
+- When partition heals, old leader discovers higher term and becomes follower
+
+**Why it's safe:**
+- Two disjoint majorities can't exist
+- If cluster size is 5, need 3 for majority
+- Can't have two groups of 3 from [1,2,3,4,5]
+
+### 3. Log Divergence on Leader Change
+
+**Problem:** Old leader crashed before replicating all entries.
+
+**Example:**
+```
+Before crash:
+Leader:    [1][2][3][4][5]
+Follower1: [1][2][3]
+Follower2: [1][2][3][4]
+
+Leader crashes, Follower2 elected (has more complete log)
+
+New leader:    [1][2][3][4]
+Old follower1: [1][2][3]
+
+What about entry [5]? Never committed → lost
+```
+
+**Solution:**
+- Entry only committed when replicated to majority
+- New leader guaranteed to have all committed entries
+- Uncommitted entries from old leader are discarded
+- Log matching property ensures consistency
+
+### 4. Stale Leader (Zombie Leader)
+
+**Problem:** Old leader partitioned, doesn't know it's not leader anymore.
+
+**Example:**
+```
+Leader 1 partitioned from cluster
+Rest of cluster elects Leader 2
+
+Client talks to old Leader 1 → writes aren't committed
+```
+
+**Solution:**
+- Leader can't commit without majority
+- Client sees timeout
+- Client retries with new leader
+- When partition heals, old leader discovers higher term
+
+### 5. Cascading Leadership Changes
+
+**Problem:** Leader keeps changing, no progress.
+
+**Causes:**
+- Network flapping
+- Overloaded nodes
+- Bad election timeout tuning
+
+**Mitigation:**
+- Tune election timeout appropriately
+- Monitor election rate
+- Ensure network stability
+- Pre-vote optimization (not implemented yet)
+
+## Technical Interview Questions
+
+### Q1: Explain the Raft leader election process.
+
+**Answer:**
+When a follower's election timeout elapses (randomized 150-300ms), it transitions to candidate state and starts an election:
+
+1. Increment currentTerm
+2. Vote for self
+3. Send RequestVote RPC to all peers
+4. If receives majority votes → becomes leader
+5. If receives AppendEntries from valid leader → becomes follower
+6. If timeout with no winner → start new election
+
+The randomized timeout prevents split votes. Leader sends periodic heartbeats (AppendEntries with no entries) to prevent followers from timing out.
+
+### Q2: How does Raft prevent split-brain?
+
+**Answer:**
+Raft prevents split-brain through **majority voting**. Any operation (election, commit) requires a majority of nodes.
+
+Key insight: Two disjoint majorities can't exist.
+
+Example with 5 nodes:
+- Majority = 3 nodes
+- If network partitions into [2] and [3]
+- Minority [2] can't elect leader or commit
+- Majority [3] can proceed normally
+- When partition heals, minority discovers higher term
+
+This is why cluster sizes are odd (3, 5, 7) - to avoid even splits.
+
+### Q3: What's the difference between Raft log and commit log?
+
+**Answer:**
+**Raft log:** Internal consensus log containing cluster coordination commands.
+- Example entries: "assign partition X to broker Y", "add broker Z"
+- Used for distributed state machine replication
+- Ensures all nodes agree on cluster state
+
+**Commit log:** Application-level data log containing user messages.
+- Example entries: actual Kafka messages from producers
+- Separate from Raft log
+- Raft coordinates which broker leads which partition, then that partition's commit log stores messages
+
+Analogy: Raft log is like meeting minutes (decisions), commit log is like actual work output.
+
+### Q4: How does Raft handle log divergence?
+
+**Answer:**
+When a follower's log diverges from the leader's, Raft uses the **log matching property**:
+
+1. Leader sends AppendEntries with `prev_log_index` and `prev_log_term`
+2. Follower checks if it has entry at `prev_log_index` with term `prev_log_term`
+3. If match → append new entries
+4. If no match → return failure
+5. Leader decrements `next_index` for that follower and retries
+6. Eventually finds matching point
+7. Follower deletes conflicting entries and replays from leader
+
+The follower's log is brought into agreement with the leader's by deleting conflicting entries and appending missing ones.
+
+### Q5: Why are term numbers important?
+
+**Answer:**
+Term numbers are Raft's **logical clock** that:
+
+1. **Detect stale leaders:** Node with higher term knows it's more up-to-date
+2. **Prevent stale operations:** Reject RPCs from lower terms
+3. **Serialize leader changes:** Each term has at most one leader
+4. **Ensure safety:** Leader can't commit entries from previous terms directly
+
+Example:
+```
+Node A (term 5, leader) gets partitioned
+Rest elect Node B (term 6, leader)
+When partition heals:
+- Node A receives AppendEntries with term 6
+- Node A sees higher term → becomes follower
+- Node A's uncommitted term-5 entries discarded
+```
+
+### Q6: What happens during a split vote?
+
+**Answer:**
+Split vote occurs when no candidate receives majority:
+
+Example (5 nodes):
+- Candidate A: votes from nodes 1, 2 (2 votes)
+- Candidate B: votes from nodes 3, 4 (2 votes)
+- Node 5: timed out before voting
+- Result: No one has 3 votes (majority)
+
+**Resolution:**
+1. Candidates timeout (randomized 150-300ms)
+2. They start new elections in different terms
+3. Random timeouts mean one likely starts first
+4. First to request votes usually wins
+5. Process repeats until successful
+
+**Why randomization works:** If timeouts were same, split votes would repeat. Random timeouts break symmetry.
+
+### Q7: How does Raft ensure committed entries aren't lost?
+
+**Answer:**
+Through the **Leader Completeness Property**:
+
+1. Entry is committed only when replicated to majority
+2. Election requires candidate's log to be at least as up-to-date as voter's
+3. Voter checks: `(candidate_term > my_term) || (candidate_term == my_term && candidate_index >= my_index)`
+4. Candidate can't win majority without having all committed entries
+5. Therefore, new leader always has all committed entries
+
+Example:
+```
+Entry X committed in term 5 (replicated to majority)
+Election in term 6:
+- Candidate without X can't win majority
+- At least one node in majority has X
+- That node won't vote for candidate lacking X
+```
+
+### Q8: Compare Raft and Paxos.
+
+**Answer:**
+
+| Aspect | Raft | Paxos |
+|--------|------|-------|
+| Understandability | Designed for understandability | Notoriously difficult |
+| Leader | Strong leader (all writes go through leader) | No strong leader |
+| Log structure | Leader appends sequentially | Independent agreement per slot |
+| Election | Separate election phase | Interleaved with replication |
+| Membership changes | Dynamic configuration changes | Complex |
+| Adoption | etcd, Consul, CockroachDB | Chubby, Spanner |
+
+**Raft advantages:**
+- Easier to understand and implement
+- Cleaner separation of concerns
+- Better for teaching
+
+**Paxos advantages:**
+- Theoretically more general
+- Some variants more efficient
+
+For most applications, Raft's understandability outweighs Paxos's theoretical elegance.
+
+### Q9: What are the trade-offs of cluster size?
+
+**Answer:**
+
+| Cluster Size | Fault Tolerance | Quorum Size | Performance | Cost |
+|--------------|-----------------|-------------|-------------|------|
+| 1 | 0 failures | 1 | Fastest | Lowest |
+| 3 | 1 failure | 2 | Fast | Low |
+| 5 | 2 failures | 3 | Medium | Medium |
+| 7 | 3 failures | 4 | Slower | High |
+
+**Considerations:**
+- **Fault tolerance:** (N-1)/2 failures tolerated
+- **Latency:** Increases with cluster size (need more acks)
+- **Network:** O(N²) messages for broadcasts
+- **Recommendation:** 3 or 5 nodes for most applications
+
+**Why odd numbers?**
+- Even: 4 nodes tolerate 1 failure, 5 nodes tolerate 2 failures
+- 4 and 5 both need 3 for quorum
+- 5 is better (more fault tolerance, same performance)
+
+### Q10: How would you debug a Raft cluster that keeps electing new leaders?
+
+**Answer:**
+**Symptoms:** High leader election rate, no progress.
+
+**Debugging steps:**
+
+1. **Check election timeout tuning:**
+   - Too short → frequent unnecessary elections
+   - Rule: election_timeout >> heartbeat_interval
+   - Recommended: heartbeat=50ms, election=150-300ms
+
+2. **Check network latency:**
+   - High latency → heartbeats arrive late → timeouts
+   - Solution: Increase election timeout or improve network
+
+3. **Check leader load:**
+   - Overloaded leader → can't send heartbeats in time
+   - Solution: Reduce load or scale up leader
+
+4. **Check for network partitions:**
+   - Flapping partition → repeated leader changes
+   - Solution: Fix network stability
+
+5. **Check logs:**
+   - Look for term number progression
+   - Look for vote patterns
+   - Identify which nodes are becoming leader
+
+6. **Metrics to monitor:**
+   - Elections per minute
+   - Average term duration
+   - Heartbeat latency
+   - Vote success rate
+
+## Code Highlights
+
+### Leader Election
+
+```python
+async def _start_election(self) -> None:
+    # Become candidate
+    self.state_machine.become_candidate()
+    
+    # Request votes
+    votes_received = 1  # Self
+    votes_needed = (len(self.peer_ids) + 1) // 2 + 1
+    
+    request = RequestVoteRequest(
+        term=self.state_machine.persistent.current_term,
+        candidate_id=self.node_id,
+        last_log_index=self.state_machine.get_last_log_index(),
+        last_log_term=self.state_machine.get_last_log_term(),
+    )
+    
+    # Collect votes concurrently
+    responses = await gather_votes_from_peers(request)
+    
+    for response in responses:
+        if response.vote_granted:
+            votes_received += 1
+    
+    # Check if won
+    if votes_received >= votes_needed:
+        await self._become_leader()
+```
+
+### Log Replication
+
+```python
+async def _replicate_to_follower(self, peer_id: int) -> None:
+    next_index = self.leader_state.next_index[peer_id]
+    prev_log_index = next_index - 1
+    
+    # Get entries to send
+    entries = self.log[next_index:]
+    
+    request = AppendEntriesRequest(
+        term=self.current_term,
+        leader_id=self.node_id,
+        prev_log_index=prev_log_index,
+        prev_log_term=self.log[prev_log_index].term,
+        entries=entries,
+        leader_commit=self.commit_index,
+    )
+    
+    response = await send_append_entries(peer_id, request)
+    
+    if response.success:
+        # Update follower state
+        self.match_index[peer_id] = response.match_index
+        self.next_index[peer_id] = response.match_index + 1
+    else:
+        # Retry with earlier index
+        self.next_index[peer_id] -= 1
+```
+
+### Commit Index Update
+
+```python
+def _update_commit_index(self) -> None:
+    # Find highest index replicated on majority
+    match_indices = list(self.leader_state.match_index.values())
+    match_indices.append(self.get_last_log_index())  # Include self
+    match_indices.sort()
+    
+    # Median is the majority index
+    majority_index = match_indices[len(match_indices) // 2]
+    
+    # Only commit entries from current term
+    if majority_index > self.commit_index:
+        entry = self.get_log_entry(majority_index)
+        if entry.term == self.current_term:
+            self.commit_index = majority_index
+```
+
+### Vote Granting Logic
+
+```python
+async def handle_request_vote(self, request):
+    # Update term if higher
+    if request.term > self.current_term:
+        self.become_follower(request.term)
+    
+    vote_granted = False
+    
+    # Check if can vote
+    if request.term == self.current_term:
+        if (self.voted_for is None or 
+            self.voted_for == request.candidate_id):
+            
+            # Check log up-to-date
+            if self._is_log_up_to_date(
+                request.last_log_index,
+                request.last_log_term,
+            ):
+                vote_granted = True
+                self.voted_for = request.candidate_id
+                self.save_state()
+    
+    return RequestVoteResponse(
+        term=self.current_term,
+        vote_granted=vote_granted,
+    )
+```
+
+## System Properties
+
+1. **Safety:** At most one leader per term
+2. **Liveness:** Cluster makes progress if majority available
+3. **Linearizability:** Operations appear atomic and ordered
+4. **Fault Tolerance:** Tolerates (N-1)/2 failures
+5. **Consistency:** All nodes converge to same log
+
+## Raft vs Leader-Follower Replication
+
+| Aspect | Raft | Leader-Follower (Task 11) |
+|--------|------|---------------------------|
+| Purpose | Cluster coordination | Data replication |
+| Log | Cluster commands | User messages |
+| Election | Automatic | Manual/external |
+| Voting | Majority required | No voting |
+| Split-brain | Prevented | Possible without Raft |
+| Consistency | Linearizable | Eventually consistent |
+
+**Together:** Raft elects partition leaders, then leader-follower replicates partition data.
+
+## Lessons Learned
+
+1. **Randomization is key** - prevents split votes and livelock
+2. **Majorities are fundamental** - prevent split-brain mathematically
+3. **Terms serialize time** - detect and reject stale operations
+4. **Persistent state is critical** - safety depends on it
+5. **Log matching simplifies recovery** - brings followers up-to-date systematically
+6. **Async is essential** - handling many concurrent RPCs efficiently
+7. **Testing is hard** - need to simulate partitions, delays, crashes
+
+## Comparable Systems
+
+- **etcd:** Uses Raft for distributed configuration
+- **Consul:** Raft for service discovery coordination
+- **CockroachDB:** Raft for distributed SQL consistency
+- **TiKV:** Raft for distributed key-value store
+- **Kafka (KRaft):** Migrating from ZooKeeper to Raft
+- **Zab (ZooKeeper):** Similar to Raft but older
+- **Multi-Paxos:** Theoretical ancestor of Raft
+
+---
+
+**Document Version:** 11.0  
 **Last Updated:** January 16, 2026  
-**Next Update:** After Phase 2 (Raft consensus and failover)
+**Next Update:** After leader failover and exactly-once semantics

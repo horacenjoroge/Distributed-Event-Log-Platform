@@ -456,13 +456,22 @@ Phase 4 (Future): Production Hardening
 - Min ISR requirement for writes
 - Under-replication detection
 - Configurable replication thresholds
+- Raft consensus for leader election
+- Three Raft states (Follower, Candidate, Leader)
+- Leader election with majority voting
+- Term numbers for logical time
+- Persistent state with crash recovery
+- Log replication with consistency checking
+- Split vote prevention with randomized timeouts
+- Split-brain prevention via majority quorum
+- Log divergence handling
 
 ### What's Next:
-- Leader election and failover
-- Consensus algorithm (Raft)
-- Exactly-once semantics
-- Transactional writes
+- Leader failover and recovery
+- Exactly-once message delivery semantics
+- Transactional writes (two-phase commit)
 - Multi-datacenter replication
+- Byzantine fault tolerance
 
 ### Known Issues:
 - None
@@ -575,7 +584,56 @@ Phase 4 (Future): Production Hardening
 
 ---
 
+#### Task 12: feat/raft-consensus (COMPLETED)
+**Completion Date:** January 16, 2026
+**Commits:** 5+ commits
+
+**Deliverables:**
+- [x] Raft state machine (Follower, Candidate, Leader)
+- [x] Leader election with majority voting
+- [x] Raft log replication
+- [x] Term numbers and persistent state
+- [x] RequestVote RPC implementation
+- [x] AppendEntries RPC (heartbeat + replication)
+- [x] Split vote handling with randomized timeouts
+- [x] Log divergence resolution
+- [x] Comprehensive tests (60+ test cases)
+
+**Features Implemented:**
+- RaftState enum (Follower, Candidate, Leader)
+- PersistentState with atomic save/load (term, votedFor, log)
+- VolatileState (commitIndex, lastApplied)
+- LeaderState (nextIndex, matchIndex per follower)
+- RaftStateMachine with state transitions
+- Election timeout with randomization (150-300ms)
+- Term number tracking and validation
+- RequestVoteRequest/Response messages
+- AppendEntriesRequest/Response messages
+- RaftNode with async event loops
+- Leader election with concurrent vote collection
+- Heartbeat protocol (50ms interval)
+- Log replication to followers
+- Commit index advancement on majority replication
+- Log matching and conflict resolution
+- Mock transport layer for testing
+- Network partition simulation
+
+**Files Created:** 7 files, 2,800+ lines
+
+**Key Concepts Implemented:**
+- Three Raft states with proper transitions
+- Leader election with majority voting
+- Term-based logical clock for detecting stale leaders
+- Persistent state surviving crashes
+- Log replication with prev_log consistency check
+- Commit only when replicated to majority
+- Randomized election timeouts prevent split votes
+- Split-brain prevention via majority requirement
+- Log divergence handling with backtracking
+
+---
+
 **Last Updated:** January 16, 2026  
 **Current Sprint:** Phase 2 - Replication and Fault Tolerance
-**Next Sprint:** Phase 2 - Consensus (Tasks 12-15)
-**Progress:** 11/15 tasks complete (73%)
+**Next Sprint:** Phase 2 - Exactly-Once Semantics (Tasks 13-15)
+**Progress:** 12/15 tasks complete (80%)
