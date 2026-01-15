@@ -5107,6 +5107,704 @@ async def handle_request_vote(self, request):
 
 ---
 
-**Document Version:** 11.0  
+# Task 13: Cluster Controller
+
+## What I Built
+
+Implemented **centralized cluster controller** that uses Raft for coordination - the brain that manages partition leadership, replica assignment, and cluster-wide metadata.
+
+### Components
+
+#### 1. Cluster Controller (`controller.py`)
+```
+ClusterController
+├── Controller election (via Raft leader)
+├── Partition leader election
+├── Replica assignment (round-robin)
+├── ISR management
+├── Broker failure detection
+├── Metadata propagation
+├── Controller failover
+└── Controller epoch tracking
+
+ControllerState
+├── controller_id: Current controller broker
+├── controller_epoch: Monotonic epoch number
+└── is_active: Whether this broker is controller
+
+PartitionAssignment
+├── Topic and partition
+├── Replicas list
+├── Leader broker
+└── ISR set
+```
+
+#### 2. Metadata Propagation (`metadata.py`)
+```
+UpdateMetadataRequest
+├── controller_id and epoch
+├── partition_updates: Leader/ISR changes
+├── broker_updates: Broker additions
+└── deleted_topics: Topic deletions
+
+MetadataPropagator
+├── Propagate to all brokers
+├── Track metadata versions
+└── Handle propagation failures
+
+MetadataCache
+├── Store cluster metadata locally
+├── Reject stale epochs
+└── Query partition/broker info
+```
+
+## Core Concepts
+
+### Controller Election
+
+**What:** One broker is elected as the active controller.
+
+**How:** Uses Raft consensus from Task 12.
+
+**Process:**
+1. Raft elects a leader among brokers
+2. Raft leader becomes cluster controller
+3. Controller epoch increments
+4. Controller initializes cluster state
+
+**Why Raft?**
+- Automatic election (no manual intervention)
+- Split-brain prevention via majority voting
+- Consistent controller state across failures
+
+### Controller Responsibilities
+
+**1. Partition Leader Election:**
+- Elect partition leaders from ISR (preferred)
+- Unclean election from replicas if no ISR available
+- Track leader epoch per partition
+
+**2. Replica Assignment:**
+- Assign replicas to brokers (round-robin)
+- Balance partition load across cluster
+- Consider replication factor
+
+**3. ISR Management:**
+- Monitor replica lag
+- Add/remove replicas from ISR
+- Ensure min ISR requirement
+
+**4. Broker Failure Detection:**
+- Track broker heartbeats
+- Detect failed brokers (30s timeout)
+- Trigger partition leader reelection
+
+**5. Metadata Propagation:**
+- Send UpdateMetadata RPC to all brokers
+- Propagate partition leader changes
+- Propagate broker additions/removals
+
+### Controller Epoch
+
+**What:** Monotonic counter incremented on each controller change.
+
+**Purpose:**
+- Detect stale controllers (zombie controllers)
+- Reject operations from old controllers
+- Ensure linearizable operations
+
+**Example:**
+```
+Controller 1 (epoch 5) gets partitioned
+Rest of cluster elects Controller 2 (epoch 6)
+
+Controller 1 tries to change partition leader:
+- Brokers see epoch 5 < current epoch 6
+- Reject the operation
+- Prevents split-brain
+```
+
+**Similar to:** Raft term numbers, but at controller level.
+
+### Partition Leader Election
+
+**Preferred:** Elect from ISR (clean election)
+```
+ISR = {2, 3}, Replicas = {1, 2, 3}
+Leader fails → Elect broker 2 or 3 (both in ISR)
+No data loss (ISR has all committed data)
+```
+
+**Unclean:** Elect from any replica
+```
+ISR = {}, Replicas = {1, 2, 3}
+All ISR offline → Elect broker 1, 2, or 3
+Potential data loss (non-ISR may be behind)
+```
+
+**Configuration:**
+- `unclean.leader.election.enable=true`: Allow unclean
+- `unclean.leader.election.enable=false`: Partition unavailable if no ISR
+
+### Metadata Propagation
+
+**UpdateMetadata RPC:**
+```
+Controller → All Brokers:
+{
+  controller_id: 1,
+  controller_epoch: 5,
+  partition_updates: [
+    {topic: "test", partition: 0, leader: 2, isr: [2,3], replicas: [1,2,3]}
+  ],
+  broker_updates: [
+    {broker_id: 4, host: "broker4", port: 9092}
+  ]
+}
+```
+
+**Brokers:**
+1. Verify controller epoch (reject if stale)
+2. Update local metadata cache
+3. Respond with success/error
+
+**Why propagate?**
+- All brokers need to know partition leaders
+- Producers/consumers query any broker for metadata
+- Brokers route requests to correct partition leader
+
+## Design Decisions
+
+### 1. Centralized Controller
+**Decision:** Single controller manages all cluster operations.
+
+**Advantages:**
+- Simpler reasoning about cluster state
+- Linearizable operations (one decision maker)
+- Easier to implement
+
+**Trade-offs:**
+- Single point of contention
+- Controller can become bottleneck
+- More work during failover
+
+**Alternatives:**
+- Distributed control (no single controller)
+- Hierarchical control (regional controllers)
+
+### 2. Raft for Controller Election
+**Decision:** Use Raft (Task 12) for controller election.
+
+**Rationale:**
+- Automatic election
+- Split-brain prevention
+- Consistent state
+
+**Alternative:** ZooKeeper (Kafka's original approach).
+
+### 3. Controller Epoch vs Raft Term
+**Decision:** Separate controller epoch from Raft term.
+
+**Why:**
+- Controller epoch is cluster-wide metadata
+- Raft term is internal to Raft protocol
+- Controller epoch increments only on controller change
+- Raft term increments on every election
+
+### 4. ISR-Preferred Leader Election
+**Decision:** Prefer ISR for leader election, unclean as fallback.
+
+**Rationale:**
+- ISR guarantees no data loss
+- Unclean election allows availability over durability
+- Configuration controls trade-off
+
+### 5. Heartbeat-Based Failure Detection
+**Decision:** 30-second heartbeat timeout.
+
+**Rationale:**
+- Balance between false positives and detection speed
+- Network hiccups don't trigger unnecessary failovers
+- Fast enough for most use cases
+
+**Tuning:**
+- Lower timeout: Faster detection, more false positives
+- Higher timeout: Slower detection, fewer false positives
+
+## Deep End: The Hard Parts
+
+### 1. Controller Failure During Partition Reassignment
+
+**Problem:** Controller fails mid-way through reassigning partitions.
+
+**Example:**
+```
+Controller starts moving partition from [1,2,3] to [2,3,4]
+1. Remove replica 1 (DONE)
+2. Add replica 4 (IN PROGRESS)
+3. Controller crashes
+Result: Partition stuck with replicas [2,3]
+```
+
+**Solution:**
+- Record reassignment in Raft log
+- New controller resumes reassignment
+- Idempotent operations (safe to retry)
+
+### 2. Cascading Controller Failures
+
+**Problem:** New controller keeps failing immediately.
+
+**Causes:**
+- Controller overloaded
+- Resource exhaustion
+- Software bug
+
+**Solution:**
+- Controller load shedding
+- Rate limit metadata updates
+- Circuit breaker for broker operations
+- Controller health metrics
+
+### 3. Thundering Herd on Controller Restart
+
+**Problem:** All brokers contact new controller simultaneously.
+
+**Example:**
+```
+Controller restarts
+1000 brokers send heartbeat immediately
+Controller overwhelmed
+```
+
+**Solution:**
+- Jittered heartbeat intervals
+- Broker backoff on controller unavailable
+- Controller rate limiting
+- Gradual state synchronization
+
+### 4. Split-Brain (Two Controllers)
+
+**Problem:** Network partition creates two controllers.
+
+**Prevention (via Raft):**
+- Only majority partition can have Raft leader
+- Only Raft leader can be controller
+- Minority partition controller resigns
+
+**Example:**
+```
+5 brokers: [1,2,3,4,5]
+Partition into [1,2] and [3,4,5]
+
+Minority [1,2]:
+- Can't elect Raft leader (need 3 votes)
+- Controller 1 loses leadership
+- Controller 1 resigns
+
+Majority [3,4,5]:
+- Can elect Raft leader (e.g., broker 3)
+- Broker 3 becomes controller
+- Only controller 3 can make changes
+```
+
+### 5. Metadata Propagation Failure
+
+**Problem:** Some brokers don't receive metadata updates.
+
+**Example:**
+```
+Controller changes partition leader: 1 → 2
+Metadata sent to brokers [1,2,3]
+Broker 3 network issue → doesn't receive update
+Broker 3 thinks leader is still 1
+```
+
+**Solution:**
+- Retry metadata propagation
+- Broker pulls metadata periodically
+- Metadata version tracking
+- Redirect on stale metadata
+
+## Technical Interview Questions
+
+### Q1: Why do we need a centralized controller?
+
+**Answer:**
+The controller provides **centralized coordination** for cluster-wide operations:
+
+1. **Single source of truth:** All brokers agree on partition leadership
+2. **Linearizable operations:** One decision maker prevents conflicts
+3. **Simpler reasoning:** Easier to understand and debug
+4. **Atomic changes:** Multi-step operations (e.g., replica reassignment) coordinated by one entity
+
+**Without controller:**
+- Distributed consensus needed for every partition operation
+- More complex (every broker runs consensus)
+- Harder to reason about global state
+
+**Trade-off:** Controller can become bottleneck, but typically not an issue (metadata operations are infrequent).
+
+### Q2: How does controller election prevent split-brain?
+
+**Answer:**
+Controller uses **Raft consensus** (Task 12) for election:
+
+1. **Majority voting:** Need (N/2 + 1) votes to become Raft leader
+2. **Only Raft leader can be controller:** Direct mapping
+3. **Two disjoint majorities can't exist:** Mathematical impossibility
+
+**Example (5 brokers):**
+- Network partitions into [2] and [3]
+- Minority [2] can't get 3 votes → no Raft leader → no controller
+- Majority [3] can get 3 votes → Raft leader → controller
+- Only majority side makes progress
+
+**Key insight:** Same majority voting that prevents Raft split-brain prevents controller split-brain.
+
+### Q3: What is controller epoch and why is it important?
+
+**Answer:**
+Controller epoch is a **monotonic counter** incremented on each controller change.
+
+**Purpose:**
+1. **Detect zombie controllers:** Old controller thinks it's still active
+2. **Reject stale operations:** Brokers reject ops from lower epoch
+3. **Linearize operations:** Ensures newer controller's decisions override older
+
+**Example:**
+```
+Controller 1 (epoch 5) partitioned
+Cluster elects Controller 2 (epoch 6)
+Controller 1 reconnects, tries to change leader
+Brokers check: 5 < 6 → reject
+```
+
+**Similar concepts:**
+- Raft term (but controller epoch is higher-level)
+- Generation number in ZooKeeper
+- Fencing tokens in distributed systems
+
+### Q4: Explain clean vs unclean leader election.
+
+**Answer:**
+
+**Clean Election (ISR-only):**
+- Elect leader from In-Sync Replicas only
+- Guarantees **no data loss** (ISR has all committed data)
+- Partition unavailable if no ISR available
+
+**Unclean Election (any replica):**
+- Elect leader from any alive replica if no ISR
+- Prioritizes **availability over durability**
+- Potential data loss (non-ISR may be behind)
+
+**Configuration trade-off:**
+```
+unclean.leader.election.enable=false
+→ Durability (may be unavailable)
+
+unclean.leader.election.enable=true
+→ Availability (may lose data)
+```
+
+**Use cases:**
+- Financial transactions: Clean only
+- Metrics/logs: Unclean acceptable
+
+### Q5: How does controller detect broker failures?
+
+**Answer:**
+**Heartbeat-based failure detection:**
+
+1. Brokers send periodic heartbeats to controller (e.g., every 3s)
+2. Controller tracks last heartbeat time per broker
+3. If no heartbeat for 30s → broker considered failed
+4. Controller triggers partition leader reelection for affected partitions
+
+**Why 30s?**
+- Balance between false positives and detection speed
+- Network hiccups don't trigger failovers
+- Fast enough for most use cases
+
+**Actions on failure:**
+1. Remove broker from all ISRs
+2. Elect new leaders for partitions where failed broker was leader
+3. Propagate metadata updates to cluster
+
+**Alternative approaches:**
+- Active probing (controller pings brokers)
+- Peer-to-peer health checking
+
+### Q6: What happens when controller fails?
+
+**Answer:**
+**Controller failover process:**
+
+1. **Raft detects leader failure** (election timeout)
+2. **New Raft leader elected** via majority voting
+3. **New Raft leader becomes controller**:
+   - Increment controller epoch
+   - Initialize controller state
+   - Load partition assignments from Raft log
+4. **New controller takes over**:
+   - Detect leaderless partitions → elect leaders
+   - Resume in-progress operations (e.g., reassignments)
+   - Send UpdateMetadata to all brokers
+
+**Timing:**
+- Raft election: ~300ms (election timeout)
+- Controller initialization: ~1s
+- Total: ~1-2 seconds typical
+
+**During failover:**
+- Existing partition leaders continue serving
+- No new partition assignments
+- No leader elections
+
+### Q7: How does UpdateMetadata RPC work?
+
+**Answer:**
+**UpdateMetadata propagates cluster state from controller to all brokers.**
+
+**Process:**
+1. Controller makes decision (e.g., change partition leader)
+2. Controller commits decision to Raft log
+3. Controller sends UpdateMetadata RPC to all brokers:
+   ```
+   {
+     controller_id: 1,
+     controller_epoch: 5,
+     partition_updates: [{topic, partition, leader, isr, replicas}],
+     broker_updates: [{broker_id, host, port}]
+   }
+   ```
+4. Brokers:
+   - Verify controller epoch (reject if stale)
+   - Update local metadata cache
+   - Respond success/failure
+5. Controller retries on failure
+
+**Why needed?**
+- Producers/consumers query any broker for metadata
+- Brokers need to route requests to correct partition leader
+- Cluster-wide consistency of metadata
+
+### Q8: Compare controller architecture: Kafka vs our implementation.
+
+**Answer:**
+
+| Aspect | Kafka (Pre-KRaft) | Kafka (KRaft) | Our Implementation |
+|--------|-------------------|---------------|---------------------|
+| Election | ZooKeeper | Raft | Raft |
+| Metadata Storage | ZooKeeper | Raft log | Raft log |
+| Epoch Tracking | Controller epoch | Controller epoch | Controller epoch |
+| Failure Detection | ZooKeeper watches | Heartbeat | Heartbeat |
+| Metadata Propagation | UpdateMetadata RPC | UpdateMetadata RPC | UpdateMetadata RPC |
+
+**Key difference:** We use Raft from the start (like KRaft), not ZooKeeper.
+
+**Advantages of Raft:**
+- No external dependency (ZooKeeper)
+- Simpler deployment
+- Better understood consensus algorithm
+
+### Q9: What is the thundering herd problem with controller?
+
+**Answer:**
+**Problem:** When controller restarts, all brokers contact it simultaneously, overwhelming it.
+
+**Scenario:**
+```
+Controller restarts
+1000 brokers:
+- Send heartbeat immediately
+- Request metadata immediately
+- Register themselves immediately
+
+Controller:
+- Receives 3000 requests in 1 second
+- Can't handle load
+- Crashes or becomes unresponsive
+```
+
+**Solutions:**
+
+1. **Jittered intervals:**
+   ```python
+   heartbeat_interval = base_interval + random(0, jitter)
+   # Spreads out requests over time
+   ```
+
+2. **Rate limiting:**
+   - Controller limits requests/second
+   - Brokers back off on rejection
+
+3. **Gradual reconnection:**
+   - Brokers wait random time before reconnecting
+   - Exponential backoff on failure
+
+4. **Controller prioritization:**
+   - Handle critical requests first (leader election)
+   - Defer less urgent requests (metadata queries)
+
+### Q10: How would you optimize controller scalability?
+
+**Answer:**
+**Current bottlenecks:**
+1. Single controller handles all operations
+2. UpdateMetadata sent to all brokers
+3. Controller state kept in memory
+
+**Optimizations:**
+
+**1. Incremental metadata updates:**
+- Send only changed partitions, not full state
+- Reduces RPC size and processing time
+
+**2. Metadata pull instead of push:**
+- Brokers pull metadata when needed
+- Controller doesn't push to all brokers
+- Trade-off: Slight latency increase
+
+**3. Regional controllers:**
+- Hierarchical: Super-controller + regional controllers
+- Regional controller handles local broker operations
+- Super-controller coordinates regions
+
+**4. Metadata caching layers:**
+- Brokers cache and serve metadata to clients
+- Reduces controller query load
+
+**5. Async operations:**
+- Controller queues operations
+- Processes in background
+- Responds before completion
+
+**6. Controller sharding:**
+- Different controllers for different topic ranges
+- Controversial (more complex, less consistent)
+
+**Kafka approach:**
+- Incremental updates (KIP-500)
+- Broker metadata caching
+- Keep single controller (simplicity > scalability)
+
+## Code Highlights
+
+### Controller Election via Raft
+
+```python
+async def _check_controller_status(self) -> None:
+    is_leader = self.raft_node.is_leader()
+    
+    if is_leader and not self.state.is_active:
+        await self._become_controller()
+    elif not is_leader and self.state.is_active:
+        await self._resign_controller()
+
+async def _become_controller(self) -> None:
+    self.state.controller_id = self.broker_id
+    self.state.controller_epoch += 1
+    self.state.is_active = True
+    
+    # Propose to Raft for durability
+    await self.raft_node.propose(
+        "controller_change",
+        {"controller_id": self.broker_id, "epoch": self.state.controller_epoch}
+    )
+```
+
+### Partition Leader Election
+
+```python
+async def _elect_partition_leader(self, topic, partition):
+    assignment = self.partition_assignments[(topic, partition)]
+    
+    # Try ISR first (clean election)
+    for broker_id in assignment.isr:
+        if self._is_broker_alive(broker_id):
+            await self._set_partition_leader(topic, partition, broker_id)
+            return broker_id
+    
+    # Unclean election: any alive replica
+    for broker_id in assignment.replicas:
+        if self._is_broker_alive(broker_id):
+            await self._set_partition_leader(topic, partition, broker_id)
+            return broker_id
+    
+    return None  # No replicas available
+```
+
+### Broker Failure Handling
+
+```python
+async def _handle_broker_failure(self, broker_id):
+    # Remove from tracking
+    del self.broker_last_heartbeat[broker_id]
+    
+    # Elect new leaders for affected partitions
+    for key, assignment in self.partition_assignments.items():
+        if assignment.leader == broker_id:
+            topic, partition = key
+            await self._elect_partition_leader(topic, partition)
+        
+        # Remove from ISR
+        assignment.isr.discard(broker_id)
+    
+    # Record in Raft log
+    await self.raft_node.propose("broker_failure", {"broker_id": broker_id})
+```
+
+### Metadata Cache with Epoch Check
+
+```python
+async def handle_update_metadata(self, request):
+    # Reject stale epoch
+    if request.controller_epoch < self.controller_epoch:
+        return UpdateMetadataResponse(
+            error_code=1,
+            error_message="Stale controller epoch"
+        )
+    
+    # Update controller info
+    self.controller_id = request.controller_id
+    self.controller_epoch = request.controller_epoch
+    
+    # Update partition metadata
+    for update in request.partition_updates:
+        key = (update.topic, update.partition)
+        self.partition_metadata[key] = update
+```
+
+## System Properties
+
+1. **Single Controller:** At most one active controller at a time
+2. **Automatic Failover:** New controller elected within ~1-2 seconds
+3. **Consistent Metadata:** All brokers eventually converge to same state
+4. **No Split-Brain:** Raft majority voting prevents dual controllers
+5. **Durability:** Controller state persisted in Raft log
+
+## Lessons Learned
+
+1. **Centralized simplicity:** Single controller is simpler than distributed consensus per partition
+2. **Raft integration:** Controller election via Raft prevents split-brain elegantly
+3. **Epoch numbers essential:** Detect and reject stale controllers
+4. **Heartbeat vs probing:** Heartbeat-based detection is simpler and scales better
+5. **ISR-preferred election:** Clean election prevents data loss in common case
+6. **Metadata propagation:** Push model works well for small-medium clusters
+7. **Failover speed:** 1-2 second failover is acceptable for most use cases
+
+## Comparable Systems
+
+- **Kafka:** ZooKeeper controller (pre-KRaft) or Raft controller (KRaft)
+- **etcd:** Raft-based distributed key-value (similar controller pattern)
+- **Consul:** Raft-based service mesh coordinator
+- **CockroachDB:** Raft-based range leader election (per-range, not global)
+- **Cassandra:** No centralized controller (fully distributed)
+
+---
+
+**Document Version:** 12.0  
 **Last Updated:** January 16, 2026  
-**Next Update:** After leader failover and exactly-once semantics
+**Next Update:** After exactly-once semantics and transactional writes

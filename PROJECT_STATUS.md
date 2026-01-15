@@ -465,11 +465,18 @@ Phase 4 (Future): Production Hardening
 - Split vote prevention with randomized timeouts
 - Split-brain prevention via majority quorum
 - Log divergence handling
+- Centralized cluster controller
+- Controller election via Raft
+- Partition leader election (clean and unclean)
+- Controller epoch for zombie controller prevention
+- Broker failure detection (heartbeat-based, 30s timeout)
+- Metadata propagation via UpdateMetadata RPC
+- Metadata caching with epoch validation
 
 ### What's Next:
-- Leader failover and recovery
 - Exactly-once message delivery semantics
 - Transactional writes (two-phase commit)
+- Producer idempotence
 - Multi-datacenter replication
 - Byzantine fault tolerance
 
@@ -633,7 +640,53 @@ Phase 4 (Future): Production Hardening
 
 ---
 
+#### Task 13: feat/cluster-controller (COMPLETED)
+**Completion Date:** January 16, 2026
+**Commits:** 5+ commits
+
+**Deliverables:**
+- [x] Controller election using Raft
+- [x] Partition leader election logic (clean and unclean)
+- [x] Replica assignment strategies (round-robin)
+- [x] ISR management integration
+- [x] Broker failure detection (heartbeat-based)
+- [x] Metadata propagation (UpdateMetadata RPC)
+- [x] Controller failover handling
+- [x] Controller epoch tracking
+- [x] Comprehensive tests (50+ test cases)
+
+**Features Implemented:**
+- ClusterController with Raft integration
+- ControllerState with epoch tracking
+- Partition leader election from ISR (preferred)
+- Unclean leader election from any replica (fallback)
+- Round-robin replica assignment
+- Broker heartbeat tracking (30s timeout)
+- Broker failure detection and handling
+- PartitionAssignment management
+- UpdateMetadataRequest/Response messages
+- MetadataPropagator for cluster-wide updates
+- MetadataCache for broker-side metadata storage
+- Epoch-based stale controller rejection
+- Raft log integration for durability
+- Monitoring loop for brokers and partitions
+- Query methods for partition leader and ISR
+
+**Files Created:** 6 files, 2,100+ lines
+
+**Key Concepts Implemented:**
+- Controller is Raft leader (automatic election)
+- Controller epoch prevents zombie controllers
+- Clean vs unclean leader election
+- Heartbeat-based failure detection
+- UpdateMetadata RPC for state propagation
+- Metadata cache with epoch validation
+- Partition leadership management
+- ISR tracking and updates
+
+---
+
 **Last Updated:** January 16, 2026  
-**Current Sprint:** Phase 2 - Replication and Fault Tolerance
-**Next Sprint:** Phase 2 - Exactly-Once Semantics (Tasks 13-15)
-**Progress:** 12/15 tasks complete (80%)
+**Current Sprint:** Phase 2 - Replication and Fault Tolerance  
+**Next Sprint:** Phase 3 - Advanced Features (Tasks 14-15)
+**Progress:** 13/15 tasks complete (87%)
