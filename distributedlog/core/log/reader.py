@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 from typing import Iterator, Optional
 
+from distributedlog.core.index.offset_index import OffsetIndex
 from distributedlog.core.log.format import Message, MessageSet
 from distributedlog.utils.logging import get_logger
 
@@ -25,13 +26,14 @@ class LogSegmentReader:
     - Corruption recovery
     """
     
-    def __init__(self, path: Path, base_offset: int):
+    def __init__(self, path: Path, base_offset: int, use_index: bool = True):
         """
         Initialize a log segment reader.
         
         Args:
             path: Path to the segment file
             base_offset: Base offset of the segment
+            use_index: Whether to use index for faster lookups
         
         Raises:
             FileNotFoundError: If segment file doesn't exist
@@ -44,7 +46,21 @@ class LogSegmentReader:
         self._fd: Optional[int] = None
         self._current_offset = base_offset
         
-        logger.info("Initialized reader", path=str(path), base_offset=base_offset)
+        self._index: Optional[OffsetIndex] = None
+        if use_index:
+            index_path = Path(str(path).replace(".log", ".index"))
+            if index_path.exists():
+                self._index = OffsetIndex(
+                    base_offset=base_offset,
+                    directory=path.parent,
+                )
+        
+        logger.info(
+            "Initialized reader",
+            path=str(path),
+            base_offset=base_offset,
+            has_index=self._index is not None,
+        )
     
     def open(self) -> None:
         """Open the segment file for reading."""
@@ -57,11 +73,18 @@ class LogSegmentReader:
         if self._fd is not None:
             os.close(self._fd)
             self._fd = None
-            logger.debug("Closed segment reader", path=str(self.path))
+        
+        if self._index is not None:
+            self._index.close()
+            self._index = None
+        
+        logger.debug("Closed segment reader", path=str(self.path))
     
     def read_at_offset(self, offset: int) -> Optional[Message]:
         """
         Read a single message at a specific offset.
+        
+        Uses index for O(log n) lookup if available, otherwise O(n) scan.
         
         Args:
             offset: Logical offset to read
@@ -80,6 +103,27 @@ class LogSegmentReader:
         
         self.open()
         
+        if self._index is not None:
+            result = self._index.lookup(offset)
+            if result is not None:
+                closest_offset, position = result
+                os.lseek(self._fd, position, os.SEEK_SET)
+                
+                logger.debug(
+                    "Using index for lookup",
+                    target_offset=offset,
+                    start_offset=closest_offset,
+                    start_position=position,
+                )
+                
+                for message in self._read_from_position(position, closest_offset):
+                    if message.offset == offset:
+                        return message
+                    if message.offset > offset:
+                        return None
+                
+                return None
+        
         for message in self.read_all():
             if message.offset == offset:
                 return message
@@ -87,6 +131,49 @@ class LogSegmentReader:
                 return None
         
         return None
+    
+    def _read_from_position(
+        self, start_position: int, start_offset: int
+    ) -> Iterator[Message]:
+        """
+        Read messages starting from a specific file position.
+        
+        Args:
+            start_position: Byte position to start reading
+            start_offset: Logical offset at that position
+        
+        Yields:
+            Messages from that position forward
+        """
+        current_offset = start_offset
+        
+        while True:
+            length_bytes = os.read(self._fd, 4)
+            
+            if len(length_bytes) == 0:
+                break
+            
+            if len(length_bytes) < 4:
+                break
+            
+            length = int.from_bytes(length_bytes, byteorder="big")
+            
+            if length <= 0 or length > 100 * 1024 * 1024:
+                break
+            
+            remaining_bytes = os.read(self._fd, length)
+            
+            if len(remaining_bytes) < length:
+                break
+            
+            full_message = length_bytes + remaining_bytes
+            
+            try:
+                message_set = MessageSet.deserialize(full_message, current_offset)
+                yield message_set.message
+                current_offset += 1
+            except ValueError:
+                break
     
     def read_all(self) -> Iterator[Message]:
         """
