@@ -215,14 +215,20 @@ Phase 4 (Future): Advanced Features
 - Retry logic with exponential backoff
 - Metadata caching
 - In-flight request management
+- Consumer client with poll() API
+- Topic subscription and assignment
+- Offset management (auto and manual commit)
+- Seek operations (seek, beginning, end)
+- Fetch buffering
+- Position and committed tracking
 
 ### What's Next:
-- Consumer client implementation
-- Consumer groups
-- Offset management
+- Consumer groups with rebalancing
 - Multi-broker replication
 - Leader-follower pattern
 - Consensus algorithm (Raft)
+- Exactly-once semantics
+- Transactional writes
 
 ### Known Issues:
 - None
@@ -230,5 +236,5 @@ Phase 4 (Future): Advanced Features
 ---
 
 **Last Updated:** January 15, 2026  
-**Current Sprint:** Phase 1, Task 5 ✅ COMPLETE  
-**Next Sprint:** Phase 1, Task 6 - Consumer Client
+**Current Sprint:** Phase 1, Tasks 1-6 ✅ COMPLETE  
+**Next Sprint:** Phase 2 - Multi-Broker Replication
