@@ -208,10 +208,18 @@ Phase 4 (Future): Advanced Features
 - Concurrent access control (threading locks)
 - Error handling (disk full, deletion during read)
 - Performance benchmarks
+- Producer client with sync/async send
+- Message batching and accumulation
+- Compression (GZIP, SNAPPY, LZ4)
+- Partitioning strategies (5 types)
+- Retry logic with exponential backoff
+- Metadata caching
+- In-flight request management
 
 ### What's Next:
-- Producer client implementation
 - Consumer client implementation
+- Consumer groups
+- Offset management
 - Multi-broker replication
 - Leader-follower pattern
 - Consensus algorithm (Raft)
@@ -222,5 +230,5 @@ Phase 4 (Future): Advanced Features
 ---
 
 **Last Updated:** January 15, 2026  
-**Current Sprint:** Phase 1, Tasks 1-4 ✅ COMPLETE  
-**Next Sprint:** Phase 1, Tasks 5-6 - Producer/Consumer Clients
+**Current Sprint:** Phase 1, Task 5 ✅ COMPLETE  
+**Next Sprint:** Phase 1, Task 6 - Consumer Client
