@@ -221,6 +221,12 @@ Phase 4 (Future): Advanced Features
 - Seek operations (seek, beginning, end)
 - Fetch buffering
 - Position and committed tracking
+- Topic partitioning for parallelism
+- Partition metadata and configuration
+- Hash-based partition selection
+- Partition manager with assignments
+- Dynamic partition scaling (add partitions)
+- Round-robin broker assignment
 
 ### What's Next:
 - Consumer groups with rebalancing
@@ -236,5 +242,5 @@ Phase 4 (Future): Advanced Features
 ---
 
 **Last Updated:** January 15, 2026  
-**Current Sprint:** Phase 1, Tasks 1-6 ✅ COMPLETE  
+**Current Sprint:** Phase 1, Tasks 1-7 ✅ COMPLETE  
 **Next Sprint:** Phase 2 - Multi-Broker Replication
