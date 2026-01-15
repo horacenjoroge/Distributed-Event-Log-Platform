@@ -3559,6 +3559,358 @@ Result: May reprocess (duplicates) but no data loss
 
 ---
 
-**Document Version:** 8.0  
-**Last Updated:** January 15, 2026  
+# Task 10: Broker Server
+
+## Overview
+
+**What I built:** Multi-broker cluster foundation with gRPC server, inter-broker communication, connection pooling, and request routing.
+
+**Motivation:** Single-node systems don't scale. Need multi-broker architecture for horizontal scalability, fault tolerance, and high availability.
+
+## Technical Implementation
+
+### 1. Broker Metadata & Registry
+
+**Broker identity and cluster membership:**
+
+```python
+class BrokerMetadata:
+    broker_id: int                    # Unique broker ID
+    host: str                         # Hostname/IP
+    port: int                         # gRPC port
+    rack: Optional[str]               # Rack ID (topology awareness)
+    state: BrokerState               # STARTING, RUNNING, STOPPING, FAILED
+    registered_at: int                # Registration timestamp
+    last_heartbeat: int               # Last heartbeat timestamp
+```
+
+**Broker states:**
+- `STARTING`: Initializing
+- `RUNNING`: Fully operational
+- `STOPPING`: Graceful shutdown
+- `STOPPED`: Stopped cleanly
+- `FAILED`: Failure detected
+
+**Interview talking point:** "Broker states model the full lifecycle. STARTING allows warm-up before accepting traffic. FAILED enables automatic failover."
+
+### 2. Cluster Registry
+
+**Manages cluster membership:**
+
+```python
+class BrokerRegistry:
+    async def register_broker(broker_id, host, port):
+        # Add broker to cluster
+        # Elect controller if first broker
+        return metadata
+    
+    async def update_heartbeat(broker_id):
+        # Update last heartbeat
+        # Mark broker as RUNNING
+    
+    async def check_broker_health():
+        # Check all brokers for timeout
+        # Mark failed brokers
+        # Re-elect controller if needed
+```
+
+**Controller election (simple, will upgrade to Raft):**
+```python
+# Pick first live broker (sorted by ID)
+live_brokers = get_live_brokers()
+new_controller = sorted(live_brokers, key=lambda b: b.broker_id)[0]
+```
+
+**Interview talking point:** "Simple leader election for now (first live broker). Phase 2 will implement Raft consensus for proper leader election with split-brain protection."
+
+### 3. Broker gRPC Server
+
+**Production-grade async gRPC server:**
+
+```python
+class BrokerServer:
+    async def start(self):
+        # Register with cluster
+        # Create gRPC server
+        # Start heartbeat loop
+        server = grpc.aio.server(
+            futures.ThreadPoolExecutor(max_workers=10),
+            options=[
+                ("grpc.max_send_message_length", 100MB),
+                ("grpc.max_receive_message_length", 100MB),
+                ("grpc.keepalive_time_ms", 10000),
+            ],
+        )
+```
+
+**gRPC options explained:**
+- `max_send/receive_message_length`: 100MB for large batches
+- `keepalive_time_ms`: 10s keepalive for connection health
+- `keepalive_timeout_ms`: 5s timeout for keepalive response
+
+**Interview talking point:** "gRPC provides: type-safe RPC, HTTP/2 streaming, automatic retries, load balancing. Much better than REST for inter-broker communication."
+
+### 4. BrokerService Implementation
+
+**Implements all client-facing endpoints:**
+
+```python
+class BrokerServiceImpl:
+    async def Produce(request, context):
+        # Handle produce request
+        # Write to log
+        # Return offset
+    
+    async def Fetch(request, context):
+        # Handle fetch request
+        # Read from log
+        # Stream records
+    
+    async def GetMetadata(request, context):
+        # Return cluster metadata
+        # List all brokers
+        # List topic partitions
+    
+    async def HealthCheck(request, context):
+        # Return broker health status
+```
+
+**Interview talking point:** "Each endpoint is async for high concurrency. Fetch uses streaming for large result sets. Metadata cached to avoid repeated lookups."
+
+### 5. Inter-Broker Communication
+
+**Connection pooling for broker-to-broker requests:**
+
+```python
+class BrokerConnectionPool:
+    def __init__(self, max_connections_per_broker=5):
+        self._channels = {}  # Reuse gRPC channels
+        self._max_connections = max_connections_per_broker
+    
+    async def get_channel(self, broker):
+        # Reuse existing channel if healthy
+        # Create new channel if needed
+        # Auto-reconnect on failure
+```
+
+**Channel management:**
+- Reuse channels for efficiency
+- Check channel state before use
+- Automatic reconnection on failure
+- Close unhealthy channels
+
+**Interview talking point:** "Connection pooling critical for performance. Creating gRPC channels is expensive. Pool allows 5 concurrent requests per broker while reusing connections."
+
+### 6. Request Routing
+
+**Routes requests to correct brokers:**
+
+```python
+class RequestRouter:
+    async def route_produce_request(topic, partition):
+        # Find partition leader
+        # Return leader broker ID
+        return leader_id
+    
+    async def route_fetch_request(topic, partition, prefer_leader=False):
+        # Can read from leader or followers
+        # Load balance across replicas
+        return broker_id
+```
+
+**Routing logic:**
+- **Produce**: Always goes to partition leader
+- **Fetch**: Can go to leader or any in-sync replica
+- **Load balancing**: Distribute reads across replicas
+
+**Interview talking point:** "Produce must go to leader for consistency. Fetch can go to followers for read scalability. This is key to Kafka's read throughput."
+
+### 7. Connection Pooling Details
+
+**Why connection pooling matters:**
+
+```
+Without pooling:
+  Each request creates new connection
+  Connect: 10-50ms
+  TLS handshake: 50-200ms
+  Total overhead: 60-250ms per request!
+
+With pooling:
+  Reuse existing connections
+  Overhead: 0ms after first request
+  5x-50x performance improvement
+```
+
+**Implementation details:**
+```python
+# Channel state machine
+IDLE → CONNECTING → READY → SHUTDOWN
+              ↓
+           TRANSIENT_FAILURE
+              ↓
+         (auto retry)
+```
+
+**Interview talking point:** "Connection pooling reduces latency from 100ms+ to sub-millisecond. Critical for high-throughput systems. Pool size tuned based on expected concurrency."
+
+### 8. Request Timeout Handling
+
+**gRPC timeout handling:**
+
+```python
+async def request_with_timeout(stub, request):
+    try:
+        response = await stub.Method(
+            request,
+            timeout=timeout_sec,  # Hard timeout
+        )
+        return response
+    except grpc.RpcError as e:
+        if e.code() == grpc.StatusCode.DEADLINE_EXCEEDED:
+            # Timeout occurred
+            logger.error("Request timed out")
+            raise TimeoutError()
+        raise
+```
+
+**Timeout configuration:**
+- Default: 30 seconds
+- Configurable per request type
+- Produce: 10s (need fast feedback)
+- Fetch: 30s (allow long poll)
+- Metadata: 5s (should be fast)
+
+**Interview talking point:** "Timeouts prevent cascading failures. Without timeouts, slow brokers cause request pile-up. With timeouts, fast failure and retry."
+
+## Design Deep Dives
+
+### Why gRPC Instead of REST?
+
+**Question:** Why gRPC for inter-broker communication?
+
+**Answer:**
+
+**gRPC advantages:**
+- Binary protocol (faster than JSON)
+- HTTP/2 multiplexing (multiple requests per connection)
+- Streaming support (for large result sets)
+- Type safety (Protocol Buffers)
+- Built-in load balancing and retries
+
+**REST disadvantages:**
+- Text-based (slower parsing)
+- HTTP/1.1 (one request per connection)
+- No streaming (chunked encoding is clunky)
+- Manual serialization
+- Manual retry logic
+
+**Benchmark:**
+```
+gRPC: 50,000 req/sec per connection
+REST: 5,000 req/sec per connection
+Improvement: 10x
+```
+
+**Interview talking point:** "gRPC is industry standard for microservices. Kafka uses custom binary protocol. We use gRPC for better tooling and easier development."
+
+### Connection Pool Sizing
+
+**Question:** How to size connection pool?
+
+**Answer:**
+
+**Formula:** `pool_size = expected_concurrent_requests / num_brokers`
+
+**Example:**
+```
+Expected: 100 concurrent requests
+Brokers: 10
+Pool size: 100 / 10 = 10 connections per broker
+```
+
+**Trade-offs:**
+- Too small: Request queuing, higher latency
+- Too large: Memory overhead, unused connections
+
+**Our default: 5 per broker**
+- Handles 50 concurrent requests across 10 brokers
+- Good for most workloads
+- Configurable based on needs
+
+**Interview talking point:** "Connection pooling is classic resource management trade-off. Too few = bottleneck, too many = waste. Profile and tune based on workload."
+
+### Controller Election
+
+**Question:** How does controller election work?
+
+**Answer:**
+
+**Current (simple):**
+```python
+# First live broker becomes controller
+brokers = sorted(live_brokers, key=lambda b: b.broker_id)
+controller = brokers[0]
+```
+
+**Limitations:**
+- Split-brain possible
+- No consensus
+- Not Byzantine fault tolerant
+
+**Phase 2 (Raft):**
+```
+1. Broker starts election
+2. Requests votes from majority
+3. Wins with majority votes
+4. Sends heartbeats as leader
+5. Step down if lose majority
+```
+
+**Interview talking point:** "Simple election is fine for single datacenter. Raft provides proper consensus with split-brain protection. Critical for multi-datacenter deployments."
+
+## Interview Questions & Answers
+
+### Q1: Explain the broker architecture.
+
+**Answer:** "Brokers form a cluster coordinated through a registry. Each broker has unique ID, host, port. Registry tracks membership, health, and elects controller. Brokers communicate via gRPC with connection pooling. Request router sends produce to partition leaders, fetch can go to any replica. This enables horizontal scaling and fault tolerance."
+
+### Q2: How does inter-broker communication work?
+
+**Answer:** "Brokers communicate via gRPC over HTTP/2. We use connection pooling to reuse channels across requests. Each broker maintains up to 5 connections per remote broker. Channels automatically reconnect on failure. gRPC provides type-safe RPC, streaming, and built-in retries."
+
+### Q3: What happens when a broker fails?
+
+**Answer:** "Registry detects failure via heartbeat timeout (30s default). Broker marked as FAILED. If failed broker was controller, new controller is elected (first live broker). Partition replicas on failed broker become unavailable until failover completes. Clients automatically retry requests to new leader."
+
+### Q4: How do you prevent connection exhaustion?
+
+**Answer:** "Connection pooling with max 5 connections per broker. Channels are reused across requests. Unhealthy channels are closed and recreated. This prevents unlimited connection growth while maintaining high throughput."
+
+### Q5: Why async gRPC instead of sync?
+
+**Answer:** "Async allows handling thousands of concurrent connections with few threads. Sync requires one thread per connection. With async, 10 threads can handle 10,000 connections. Critical for high-concurrency broker."
+
+## Key Takeaways
+
+1. **gRPC for inter-broker communication** - type-safe, fast, streaming
+2. **Connection pooling essential** - reuse channels, auto-reconnect
+3. **Request routing to leaders** - produce to leader, fetch from any replica
+4. **Broker registry for membership** - tracking, health, controller election
+5. **Async for concurrency** - thousands of connections, few threads
+6. **Timeouts prevent cascading failures** - fast failure and retry
+7. **Simple controller election for now** - will upgrade to Raft
+8. **Heartbeat protocol for liveness** - 3s interval, 30s timeout
+
+## Comparable Systems
+
+- **Kafka:** Custom binary protocol, Zookeeper for coordination
+- **Pulsar:** gRPC for inter-broker, BookKeeper for storage
+- **NATS:** Pure TCP, no gRPC
+- **RabbitMQ:** Erlang distribution protocol
+
+---
+
+**Document Version:** 9.0  
+**Last Updated:** January 16, 2026  
 **Next Update:** After Phase 2 (replication and consensus)
