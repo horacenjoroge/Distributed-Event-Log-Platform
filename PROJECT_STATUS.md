@@ -203,19 +203,24 @@ Phase 4 (Future): Advanced Features
 - Sparse offset index (O(log n) lookups)
 - Memory-mapped files
 - Index recovery and validation
+- Retention policies (time and size-based)
+- Log compaction (deduplication)
+- Concurrent access control (threading locks)
+- Error handling (disk full, deletion during read)
+- Performance benchmarks
 
 ### What's Next:
-- Add zero-copy data transfers (sendfile)
-- Implement batch writes
-- Add compression support
-- Implement log compaction
-- Add CI/CD pipeline
+- Producer client implementation
+- Consumer client implementation
+- Multi-broker replication
+- Leader-follower pattern
+- Consensus algorithm (Raft)
 
 ### Known Issues:
-- None (fresh setup)
+- None
 
 ---
 
 **Last Updated:** January 15, 2026  
-**Current Sprint:** Phase 1, Task 3 ✅ COMPLETE  
-**Next Sprint:** Phase 1, Task 4 - Storage Layer Optimizations
+**Current Sprint:** Phase 1, Tasks 1-4 ✅ COMPLETE  
+**Next Sprint:** Phase 1, Tasks 5-6 - Producer/Consumer Clients
