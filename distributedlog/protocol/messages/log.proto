@@ -1,0 +1,118 @@
+syntax = "proto3";
+
+package distributedlog.protocol;
+
+option python_package = "distributedlog.protocol.messages";
+
+// Wire protocol version for backward/forward compatibility
+message ProtocolHeader {
+  int32 version = 1;
+  int32 correlation_id = 2;
+  string client_id = 3;
+}
+
+// Core message structure
+message Record {
+  int64 offset = 1;           // Assigned by broker
+  int64 timestamp = 2;        // Unix timestamp in milliseconds
+  bytes key = 3;              // Optional message key
+  bytes value = 4;            // Message payload
+  map<string, bytes> headers = 5;  // Optional headers
+  int32 partition = 6;        // Partition number
+  bytes checksum = 7;         // CRC32C checksum
+}
+
+message RecordBatch {
+  int64 base_offset = 1;
+  int32 partition_leader_epoch = 2;
+  int64 last_offset_delta = 3;
+  int64 first_timestamp = 4;
+  int64 max_timestamp = 5;
+  int64 producer_id = 6;        // For exactly-once semantics
+  int32 producer_epoch = 7;
+  int32 base_sequence = 8;
+  repeated Record records = 9;
+  CompressionType compression = 10;
+  bool is_transactional = 11;
+}
+
+enum CompressionType {
+  NONE = 0;
+  GZIP = 1;
+  SNAPPY = 2;
+  LZ4 = 3;
+  ZSTD = 4;
+}
+
+// Topic and partition metadata
+message TopicPartition {
+  string topic = 1;
+  int32 partition = 2;
+}
+
+message PartitionMetadata {
+  int32 partition_id = 1;
+  int32 leader_id = 2;
+  repeated int32 replica_ids = 3;
+  repeated int32 isr_ids = 4;  // In-sync replicas
+  int64 high_watermark = 5;
+  int64 log_start_offset = 6;
+  int64 log_end_offset = 7;
+}
+
+message TopicMetadata {
+  string name = 1;
+  repeated PartitionMetadata partitions = 2;
+  map<string, string> config = 3;
+  bool is_internal = 4;
+}
+
+// Error handling
+enum ErrorCode {
+  NONE = 0;
+  UNKNOWN = 1;
+  OFFSET_OUT_OF_RANGE = 2;
+  CORRUPT_MESSAGE = 3;
+  UNKNOWN_TOPIC_OR_PARTITION = 4;
+  INVALID_MESSAGE_SIZE = 5;
+  LEADER_NOT_AVAILABLE = 6;
+  NOT_LEADER_FOR_PARTITION = 7;
+  REQUEST_TIMED_OUT = 8;
+  BROKER_NOT_AVAILABLE = 9;
+  REPLICA_NOT_AVAILABLE = 10;
+  MESSAGE_TOO_LARGE = 11;
+  STALE_CONTROLLER_EPOCH = 12;
+  OFFSET_METADATA_TOO_LARGE = 13;
+  NETWORK_EXCEPTION = 14;
+  COORDINATOR_NOT_AVAILABLE = 15;
+  NOT_COORDINATOR = 16;
+  INVALID_TOPIC_EXCEPTION = 17;
+  RECORD_LIST_TOO_LARGE = 18;
+  NOT_ENOUGH_REPLICAS = 19;
+  NOT_ENOUGH_REPLICAS_AFTER_APPEND = 20;
+  INVALID_REQUIRED_ACKS = 21;
+  ILLEGAL_GENERATION = 22;
+  INCONSISTENT_GROUP_PROTOCOL = 23;
+  INVALID_GROUP_ID = 24;
+  UNKNOWN_MEMBER_ID = 25;
+  INVALID_SESSION_TIMEOUT = 26;
+  REBALANCE_IN_PROGRESS = 27;
+  INVALID_COMMIT_OFFSET_SIZE = 28;
+  TOPIC_AUTHORIZATION_FAILED = 29;
+  GROUP_AUTHORIZATION_FAILED = 30;
+  CLUSTER_AUTHORIZATION_FAILED = 31;
+  INVALID_TIMESTAMP = 32;
+  UNSUPPORTED_VERSION = 35;
+  TOPIC_ALREADY_EXISTS = 36;
+  INVALID_PARTITIONS = 37;
+  INVALID_REPLICATION_FACTOR = 38;
+  INVALID_CONFIG = 40;
+  NOT_CONTROLLER = 41;
+  INVALID_REQUEST = 42;
+  OUT_OF_ORDER_SEQUENCE_NUMBER = 45;
+  DUPLICATE_SEQUENCE_NUMBER = 46;
+  INVALID_PRODUCER_EPOCH = 47;
+  INVALID_TXN_STATE = 48;
+  FENCED_LEADER_EPOCH = 56;
+  UNKNOWN_LEADER_EPOCH = 57;
+}

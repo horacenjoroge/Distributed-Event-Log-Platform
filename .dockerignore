@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+dist/
+build/
+*.egg-info/
+
+# Git
+.git/
+.gitignore
+
+# Documentation
+*.md
+docs/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# Data and logs
+data/
+logs/
+*.log
+
+# Docker
+docker-compose*.yml
+Dockerfile
+.dockerignore
+
+# Config (will be mounted)
+config/*.yaml
+
+# Tests
+distributedlog/tests/

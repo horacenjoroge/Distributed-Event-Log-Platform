@@ -1,0 +1,147 @@
+version: '3.8'
+
+services:
+  # etcd for cluster coordination
+  etcd:
+    image: quay.io/coreos/etcd:v3.5.11
+    container_name: distributedlog-etcd
+    command:
+      - etcd
+      - --name=etcd0
+      - --advertise-client-urls=http://etcd:2379
+      - --listen-client-urls=http://0.0.0.0:2379
+      - --initial-advertise-peer-urls=http://etcd:2380
+      - --listen-peer-urls=http://0.0.0.0:2380
+      - --initial-cluster=etcd0=http://etcd:2380
+    ports:
+      - "2379:2379"
+      - "2380:2380"
+    networks:
+      - distributedlog-network
+    volumes:
+      - etcd-data:/etcd-data
+
+  # Broker 0
+  broker-0:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: distributedlog-broker-0
+    hostname: broker-0
+    depends_on:
+      - etcd
+    environment:
+      - BROKER_ID=0
+      - BROKER_HOST=broker-0
+      - CONFIG_FILE=/app/config/broker-0.yaml
+      - PYTHONUNBUFFERED=1
+    ports:
+      - "9092:9092"
+      - "9093:9093"
+      - "9094:9094"
+    volumes:
+      - broker-0-data:/var/lib/distributedlog
+      - ./config:/app/config
+      - ./logs:/app/logs
+    networks:
+      - distributedlog-network
+    restart: unless-stopped
+
+  # Broker 1
+  broker-1:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: distributedlog-broker-1
+    hostname: broker-1
+    depends_on:
+      - etcd
+    environment:
+      - BROKER_ID=1
+      - BROKER_HOST=broker-1
+      - CONFIG_FILE=/app/config/broker-1.yaml
+      - PYTHONUNBUFFERED=1
+    ports:
+      - "9192:9092"
+      - "9193:9093"
+      - "9194:9094"
+    volumes:
+      - broker-1-data:/var/lib/distributedlog
+      - ./config:/app/config
+      - ./logs:/app/logs
+    networks:
+      - distributedlog-network
+    restart: unless-stopped
+
+  # Broker 2
+  broker-2:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: distributedlog-broker-2
+    hostname: broker-2
+    depends_on:
+      - etcd
+    environment:
+      - BROKER_ID=2
+      - BROKER_HOST=broker-2
+      - CONFIG_FILE=/app/config/broker-2.yaml
+      - PYTHONUNBUFFERED=1
+    ports:
+      - "9292:9092"
+      - "9293:9093"
+      - "9294:9094"
+    volumes:
+      - broker-2-data:/var/lib/distributedlog
+      - ./config:/app/config
+      - ./logs:/app/logs
+    networks:
+      - distributedlog-network
+    restart: unless-stopped
+
+  # Prometheus for metrics
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: distributedlog-prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
+      - '--web.console.templates=/usr/share/prometheus/consoles'
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./docker/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus-data:/prometheus
+    networks:
+      - distributedlog-network
+    restart: unless-stopped
+
+  # Grafana for visualization
+  grafana:
+    image: grafana/grafana:latest
+    container_name: distributedlog-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./docker/grafana/dashboards:/etc/grafana/provisioning/dashboards
+      - ./docker/grafana/datasources:/etc/grafana/provisioning/datasources
+    networks:
+      - distributedlog-network
+    restart: unless-stopped
+
+volumes:
+  etcd-data:
+  broker-0-data:
+  broker-1-data:
+  broker-2-data:
+  prometheus-data:
+  grafana-data:
+
+networks:
+  distributedlog-network:
+    driver: bridge

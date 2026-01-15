@@ -1,0 +1,61 @@
+syntax = "proto3";
+
+package distributedlog.rpc;
+
+import "distributedlog/protocol/messages/log.proto";
+
+// Replication service (broker-to-broker only)
+service ReplicationService {
+  // Follower fetches data from leader
+  rpc ReplicateFetch(ReplicateFetchRequest) returns (stream ReplicateFetchResponse);
+  
+  // Update ISR (In-Sync Replicas)
+  rpc UpdateISR(UpdateISRRequest) returns (UpdateISRResponse);
+  
+  // Leader sends heartbeat to followers
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+}
+
+message ReplicateFetchRequest {
+  distributedlog.protocol.ProtocolHeader header = 1;
+  int32 replica_id = 2;
+  string topic = 3;
+  int32 partition = 4;
+  int64 fetch_offset = 5;
+  int32 max_bytes = 6;
+}
+
+message ReplicateFetchResponse {
+  distributedlog.protocol.ErrorCode error_code = 1;
+  string error_message = 2;
+  int64 high_watermark = 3;
+  repeated distributedlog.protocol.Record records = 4;
+  int32 partition_leader_epoch = 5;
+}
+
+message UpdateISRRequest {
+  distributedlog.protocol.ProtocolHeader header = 1;
+  string topic = 2;
+  int32 partition = 3;
+  repeated int32 isr_ids = 4;
+  int32 leader_epoch = 5;
+}
+
+message UpdateISRResponse {
+  distributedlog.protocol.ErrorCode error_code = 1;
+  string error_message = 2;
+  bool success = 3;
+}
+
+message HeartbeatRequest {
+  distributedlog.protocol.ProtocolHeader header = 1;
+  int32 leader_id = 2;
+  int32 leader_epoch = 3;
+  string topic = 4;
+  int32 partition = 5;
+}
+
+message HeartbeatResponse {
+  distributedlog.protocol.ErrorCode error_code = 1;
+  bool acknowledged = 2;
+}

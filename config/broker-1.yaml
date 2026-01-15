@@ -1,0 +1,7 @@
+# Broker 1 specific configuration
+broker:
+  id: 1
+  host: "broker-1"
+  port: 9092
+  grpc_port: 9093
+  data_dir: "/var/lib/distributedlog/broker-1"

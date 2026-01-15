@@ -1,0 +1,9 @@
+# Cursor-specific ignores
+*_pb2.py
+*_pb2.pyi
+*_pb2_grpc.py
+__pycache__/
+*.pyc
+.pytest_cache/
+data/
+logs/

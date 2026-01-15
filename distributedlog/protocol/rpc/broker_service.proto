@@ -1,0 +1,133 @@
+syntax = "proto3";
+
+package distributedlog.rpc;
+
+import "distributedlog/protocol/messages/log.proto";
+
+// Broker-to-Broker and Client-to-Broker service
+service BrokerService {
+  // Produce messages
+  rpc Produce(ProduceRequest) returns (ProduceResponse);
+  
+  // Fetch messages
+  rpc Fetch(FetchRequest) returns (stream FetchResponse);
+  
+  // Get metadata
+  rpc GetMetadata(MetadataRequest) returns (MetadataResponse);
+  
+  // Offset management
+  rpc ListOffsets(ListOffsetsRequest) returns (ListOffsetsResponse);
+  rpc CommitOffset(CommitOffsetRequest) returns (CommitOffsetResponse);
+  rpc FetchOffset(FetchOffsetRequest) returns (FetchOffsetResponse);
+  
+  // Health and diagnostics
+  rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+}
+
+// Produce Request/Response
+message ProduceRequest {
+  distributedlog.protocol.ProtocolHeader header = 1;
+  string topic = 2;
+  int32 partition = 3;
+  repeated distributedlog.protocol.Record records = 4;
+  int32 acks = 5;  // 0, 1, or -1 (all)
+  int32 timeout_ms = 6;
+  bool transactional = 7;
+  string transactional_id = 8;
+}
+
+message ProduceResponse {
+  distributedlog.protocol.ErrorCode error_code = 1;
+  string error_message = 2;
+  int64 base_offset = 3;
+  int64 log_append_time = 4;
+  int32 partition = 5;
+}
+
+// Fetch Request/Response
+message FetchRequest {
+  distributedlog.protocol.ProtocolHeader header = 1;
+  string topic = 2;
+  int32 partition = 3;
+  int64 fetch_offset = 4;
+  int32 max_bytes = 5;
+  int32 min_bytes = 6;
+  int32 max_wait_ms = 7;
+}
+
+message FetchResponse {
+  distributedlog.protocol.ErrorCode error_code = 1;
+  string error_message = 2;
+  int64 high_watermark = 3;
+  repeated distributedlog.protocol.Record records = 4;
+}
+
+// Metadata Request/Response
+message MetadataRequest {
+  distributedlog.protocol.ProtocolHeader header = 1;
+  repeated string topics = 2;  // Empty means all topics
+}
+
+message MetadataResponse {
+  distributedlog.protocol.ErrorCode error_code = 1;
+  string error_message = 2;
+  repeated BrokerMetadata brokers = 3;
+  repeated distributedlog.protocol.TopicMetadata topics = 4;
+}
+
+message BrokerMetadata {
+  int32 broker_id = 1;
+  string host = 2;
+  int32 port = 3;
+  int32 grpc_port = 4;
+}
+
+// Offset Request/Response
+message ListOffsetsRequest {
+  distributedlog.protocol.ProtocolHeader header = 1;
+  distributedlog.protocol.TopicPartition topic_partition = 2;
+  int64 timestamp = 3;  // -1 for latest, -2 for earliest
+}
+
+message ListOffsetsResponse {
+  distributedlog.protocol.ErrorCode error_code = 1;
+  string error_message = 2;
+  int64 offset = 3;
+  int64 timestamp = 4;
+}
+
+message CommitOffsetRequest {
+  distributedlog.protocol.ProtocolHeader header = 1;
+  string group_id = 2;
+  distributedlog.protocol.TopicPartition topic_partition = 3;
+  int64 offset = 4;
+  string metadata = 5;
+}
+
+message CommitOffsetResponse {
+  distributedlog.protocol.ErrorCode error_code = 1;
+  string error_message = 2;
+}
+
+message FetchOffsetRequest {
+  distributedlog.protocol.ProtocolHeader header = 1;
+  string group_id = 2;
+  distributedlog.protocol.TopicPartition topic_partition = 3;
+}
+
+message FetchOffsetResponse {
+  distributedlog.protocol.ErrorCode error_code = 1;
+  string error_message = 2;
+  int64 offset = 3;
+  string metadata = 4;
+}
+
+// Health Check
+message HealthCheckRequest {
+  distributedlog.protocol.ProtocolHeader header = 1;
+}
+
+message HealthCheckResponse {
+  bool healthy = 1;
+  string status = 2;
+}
