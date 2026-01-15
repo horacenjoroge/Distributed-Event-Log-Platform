@@ -10,6 +10,7 @@ import struct
 from pathlib import Path
 from typing import Optional
 
+from distributedlog.core.index.offset_index import OffsetIndex
 from distributedlog.core.log.format import Message, MessageSet
 from distributedlog.utils.logging import get_logger
 
@@ -41,6 +42,7 @@ class LogSegment:
         directory: Path,
         max_size_bytes: int = 1073741824,
         fsync_on_append: bool = False,
+        index_interval_bytes: int = 4096,
     ):
         """
         Initialize a log segment.
@@ -50,6 +52,7 @@ class LogSegment:
             directory: Directory to store the segment file
             max_size_bytes: Maximum segment size in bytes
             fsync_on_append: Whether to fsync after each append
+            index_interval_bytes: Bytes between index entries
         
         Raises:
             ValueError: If base_offset is negative
@@ -70,6 +73,12 @@ class LogSegment:
         self._current_size: int = 0
         self._next_offset: int = base_offset
         
+        self._index = OffsetIndex(
+            base_offset=base_offset,
+            directory=directory,
+            interval_bytes=index_interval_bytes,
+        )
+        
         self._open()
         
         logger.info(
@@ -77,6 +86,7 @@ class LogSegment:
             base_offset=self.base_offset,
             path=str(self.path),
             max_size_bytes=self.max_size_bytes,
+            index_interval=index_interval_bytes,
         )
     
     def _build_segment_path(self, offset: int) -> Path:
@@ -146,6 +156,8 @@ class LogSegment:
         message_set = MessageSet(message=message)
         data = message_set.serialize()
         
+        position_before_write = self._current_size
+        
         bytes_written = os.write(self._fd, data)
         
         if bytes_written != len(data):
@@ -159,11 +171,14 @@ class LogSegment:
         self._current_size += bytes_written
         self._next_offset += 1
         
+        self._index.append(offset, position_before_write)
+        
         logger.debug(
             "Appended message",
             offset=offset,
             size=len(data),
             total_size=self._current_size,
+            position=position_before_write,
         )
         
         return offset
@@ -176,7 +191,10 @@ class LogSegment:
         """
         if self._fd is not None:
             os.fsync(self._fd)
-            logger.debug("Flushed segment", base_offset=self.base_offset)
+        
+        self._index.flush()
+        
+        logger.debug("Flushed segment and index", base_offset=self.base_offset)
     
     def is_full(self) -> bool:
         """
@@ -209,12 +227,14 @@ class LogSegment:
         """Close the segment and release resources."""
         self.flush()
         self._close()
+        self._index.close()
         
         logger.info(
             "Closed segment",
             base_offset=self.base_offset,
             final_size=self._current_size,
             messages=self._next_offset - self.base_offset,
+            index_entries=self._index.entries_count(),
         )
     
     def __enter__(self) -> "LogSegment":
