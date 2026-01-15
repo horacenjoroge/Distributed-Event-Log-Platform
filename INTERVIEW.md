@@ -5805,6 +5805,507 @@ async def handle_update_metadata(self, request):
 
 ---
 
-**Document Version:** 12.0  
+# Task 14: Partition Reassignment
+
+## What I Built
+
+Implemented **partition reassignment** for live partition migration - enabling zero-downtime movement of partitions between brokers with bandwidth throttling and progress monitoring.
+
+### Components
+
+#### 1. Reassignment State (`state.py`)
+```
+ReassignmentPhase
+├── PENDING: Waiting to start
+├── ADDING_REPLICAS: Adding new replicas
+├── WAITING_CATCHUP: Waiting for catch-up
+├── REMOVING_REPLICAS: Removing old replicas
+├── COMPLETED: Successfully completed
+├── FAILED: Failed with error
+└── CANCELLED: Cancelled by user
+
+ReassignmentState
+├── Old/new/current replicas
+├── Current phase and progress
+├── Duration tracking
+└── Error messages
+
+ReassignmentTracker
+├── Track active reassignments
+├── Maintain completion history
+└── Support cancellation
+```
+
+#### 2. Reassignment Executor (`executor.py`)
+```
+ReassignmentExecutor
+├── Multi-phase orchestration
+├── Phase 1: Add new replicas
+├── Phase 2: Wait for catch-up
+├── Phase 3: Remove old replicas
+├── Background processing loop
+└── Start/cancel/status API
+```
+
+#### 3. Bandwidth Throttling (`throttle.py`)
+```
+ReplicationThrottle
+├── Token bucket algorithm
+├── Per-second rate limiting
+├── Dynamic rate adjustment
+└── Statistics tracking
+
+PartitionThrottleManager
+├── Per-partition throttles
+├── Global bandwidth limit
+└── Coordinated throttling
+```
+
+#### 4. Progress Monitoring (`monitor.py`)
+```
+ReassignmentMonitor
+├── Real-time metrics
+├── Bytes replicated tracking
+├── Completion time estimation
+└── Summary statistics
+```
+
+## Core Concepts
+
+### Multi-Phase Reassignment
+
+**Goal:** Move partition from brokers [1,2,3] → [2,3,4]
+
+**Phase 1: Add New Replicas**
+```
+Current: [1,2,3]
+Add broker 4 to replica set
+Result: [1,2,3,4]  (expanded replica set)
+```
+
+**Phase 2: Wait for Catch-Up**
+```
+Broker 4 replicates data from leader
+Wait until lag < threshold (default: 100 messages)
+Timeout if catch-up takes > 5 minutes
+```
+
+**Phase 3: Remove Old Replicas**
+```
+Current: [1,2,3,4]
+Remove broker 1 from replica set
+Result: [2,3,4]  (final replica set)
+```
+
+**Why Multi-Phase?**
+- Ensures no data loss (new replicas catch up first)
+- Maintains replication factor during migration
+- Enables rollback before removing old replicas
+
+### Throttling for Production Safety
+
+**Problem:** Unthrottled replication can saturate network.
+
+**Solution:** Token bucket rate limiting
+```
+Rate: 10 MB/s
+Bucket size: 10 MB
+Refill rate: 10 MB/s
+
+Request 5 MB:
+- Bucket has 10 MB → grant immediately
+- Bucket now has 5 MB
+- Wait 0.5s to refill to 10 MB
+
+Request 15 MB:
+- Bucket has 10 MB → grant 10 MB
+- Wait 0.5s for 5 MB more
+- Grant remaining 5 MB
+```
+
+**Two-Level Throttling:**
+1. **Global limit:** 10 MB/s across all reassignments
+2. **Per-partition limit:** 1 MB/s per partition
+
+### Progress Monitoring
+
+**Tracked Metrics:**
+- Current phase
+- Progress percentage (0-100%)
+- Bytes replicated
+- Duration (time elapsed)
+- Estimated time remaining
+- Replicas added/removed
+- Errors encountered
+
+**Progress Calculation:**
+```
+Phase 1 (Adding): 10-30%
+Phase 2 (Catch-up): 30-60%
+Phase 3 (Removing): 60-100%
+```
+
+## Design Decisions
+
+### 1. Pull-Based Replication for Catch-Up
+**Decision:** New replicas pull data from leader.
+
+**Rationale:** Consistent with existing replication (Task 11).
+
+**Alternative:** Push from leader (more complex).
+
+### 2. Multi-Phase vs Single-Phase
+**Decision:** Three distinct phases with explicit transitions.
+
+**Rationale:**
+- Safer (catch-up before removing old replicas)
+- Observable (clear progress tracking)
+- Rollback-friendly (can cancel before phase 3)
+
+**Trade-off:** Slower than atomic swap, but much safer.
+
+### 3. Token Bucket Throttling
+**Decision:** Token bucket algorithm for rate limiting.
+
+**Rationale:**
+- Allows bursts while enforcing average rate
+- Simple and efficient
+- Industry standard (used by AWS, GCP)
+
+**Alternative:** Leaky bucket (stricter, no bursts).
+
+### 4. Background Executor Loop
+**Decision:** Async background loop processes reassignments.
+
+**Rationale:**
+- Non-blocking (controller not blocked)
+- Handles multiple reassignments concurrently
+- Periodic progress checks
+
+**Configuration:** Check interval = 1 second.
+
+## Deep End: The Hard Parts
+
+### 1. Reassignment During Broker Failure
+
+**Problem:** Broker fails mid-reassignment.
+
+**Scenario 1: New replica fails during catch-up**
+```
+Phase: WAITING_CATCHUP
+Replicas: [1,2,3,4] (4 is catching up)
+Broker 4 crashes
+
+Solution:
+- Detect failure via heartbeat
+- Mark reassignment as FAILED
+- Revert to old replicas [1,2,3]
+- User can retry with different broker
+```
+
+**Scenario 2: Old replica fails before removal**
+```
+Phase: WAITING_CATCHUP
+Replicas: [1,2,3,4]
+Broker 1 crashes (to be removed)
+
+Solution:
+- Continue reassignment (1 is leaving anyway)
+- Skip removal of broker 1 (already gone)
+- Complete with [2,3,4]
+```
+
+### 2. Multiple Simultaneous Reassignments
+
+**Problem:** Reassigning 100 partitions simultaneously.
+
+**Challenges:**
+- **Network saturation:** 100 partitions × 1 MB/s = 100 MB/s
+- **Controller load:** Tracking 100 reassignments
+- **Replication lag:** Many partitions catching up
+
+**Solutions:**
+1. **Global throttle:** Limit total bandwidth (10 MB/s)
+2. **Staged reassignments:** Process N at a time
+3. **Priority queue:** Critical partitions first
+4. **Per-partition throttle:** Prevent single partition hogging bandwidth
+
+**Kafka approach:** Throttle + batch processing.
+
+### 3. Partition Under-Replication During Migration
+
+**Problem:** Temporarily fewer ISR during migration.
+
+**Scenario:**
+```
+Initial: replicas=[1,2,3], ISR={1,2,3}
+After adding 4: replicas=[1,2,3,4], ISR={1,2,3} (4 not caught up yet)
+If 1 fails: ISR={2,3} (still meets min_isr=2)
+If 2 fails too: ISR={3} (below min_isr=2) → partition unavailable
+```
+
+**Risk:** More replicas = more failure points during migration.
+
+**Mitigation:**
+- Fast catch-up (high throttle limit for critical partitions)
+- Monitor ISR size continuously
+- Pause reassignment if ISR drops too low
+- Configure higher `min_isr` for critical topics
+
+### 4. Catch-Up Never Completes
+
+**Problem:** New replica never catches up (slow broker, network issues).
+
+**Timeout:** Default 5 minutes
+```
+If catch-up takes > 5 minutes:
+- Mark reassignment as FAILED
+- Log timeout error
+- Remove new replica from replica set
+- Revert to old replicas
+```
+
+**Debugging:**
+- Check network bandwidth
+- Check broker disk I/O
+- Check replication lag
+- Increase timeout for large partitions
+
+### 5. Concurrent Reassignments on Same Partition
+
+**Problem:** User starts reassignment while one is active.
+
+**Solution:**
+```python
+if partition already being reassigned:
+    return error "Reassignment already in progress"
+```
+
+**Alternative:** Queue the new reassignment (not implemented).
+
+## Technical Interview Questions
+
+### Q1: Explain the multi-phase reassignment process.
+
+**Answer:**
+Partition reassignment uses a **3-phase process** for safe live migration:
+
+**Phase 1: Add New Replicas**
+- Expand replica set: [1,2,3] → [1,2,3,4]
+- New replica (4) starts replicating from leader
+- No disruption (old replicas still serve)
+
+**Phase 2: Wait for Catch-Up**
+- Monitor lag of new replica
+- Wait until lag < threshold (100 messages)
+- Timeout if catch-up takes too long (5 min)
+
+**Phase 3: Remove Old Replicas**
+- Shrink replica set: [1,2,3,4] → [2,3,4]
+- Old replica (1) stops replicating
+- Reassignment complete
+
+**Why not atomic swap?**
+- Safer: new replica catches up before old one leaves
+- No data loss: always have >= replication factor
+- Observable: can monitor catch-up progress
+
+### Q2: How does bandwidth throttling work?
+
+**Answer:**
+Uses **token bucket algorithm** for rate limiting:
+
+**Token Bucket:**
+- Bucket holds tokens (bytes)
+- Refills at rate R (bytes/sec)
+- Max capacity C (bytes)
+
+**Operation:**
+```python
+async def acquire(bytes_requested):
+    while tokens < bytes_requested:
+        # Wait for refill
+        wait_time = (bytes_requested - tokens) / rate
+        await sleep(wait_time)
+    
+    tokens -= bytes_requested
+```
+
+**Two-Level Throttling:**
+1. **Global:** 10 MB/s total
+2. **Per-partition:** 1 MB/s per partition
+
+**Why?**
+- Prevent network saturation
+- Protect production traffic
+- Multiple partitions share fairly
+
+### Q3: What happens if a broker fails during reassignment?
+
+**Answer:**
+Depends on which broker and which phase:
+
+**New replica fails (being added):**
+- Catch-up never completes → timeout → FAILED
+- Revert to old replicas
+- User can retry with different broker
+
+**Old replica fails (being removed):**
+- Already planned to leave → no problem
+- Skip removal step (already gone)
+- Continue with remaining replicas
+
+**Leader fails:**
+- Controller elects new leader (Raft)
+- Reassignment continues with new leader
+- New replica catches up from new leader
+
+**Key insight:** Reassignment is resilient because we expand first (add before remove).
+
+### Q4: How do you prevent multiple simultaneous reassignments from overwhelming the cluster?
+
+**Answer:**
+**Multi-layered approach:**
+
+**1. Global bandwidth throttle:**
+```
+100 partitions × 1 MB/s = 100 MB/s theoretical
+Global limit: 10 MB/s
+Actual: Each partition gets 0.1 MB/s
+```
+
+**2. Staged processing:**
+```
+Process 10 partitions at a time
+Wait for batch to complete
+Process next 10
+```
+
+**3. Priority queue:**
+```
+Critical partitions: High priority
+Regular partitions: Normal priority
+Background partitions: Low priority
+```
+
+**4. Controller rate limiting:**
+```
+Max reassignments per second: 10
+Prevents controller overload
+```
+
+**Kafka approach:** Similar throttling + manual batch control.
+
+### Q5: Why not just atomic swap replicas?
+
+**Answer:**
+**Atomic swap approach:**
+```
+[1,2,3] → [2,3,4] instantly
+```
+
+**Problems:**
+1. **Data loss risk:** Broker 4 is empty, has no data
+2. **Under-replication:** Briefly at replication factor 0
+3. **No rollback:** Can't undo if problems
+
+**Multi-phase approach:**
+```
+[1,2,3] → [1,2,3,4] → [2,3,4]
+```
+
+**Advantages:**
+1. **Safety:** New replica catches up first
+2. **Rollback:** Can cancel before removing old
+3. **Observable:** Track catch-up progress
+4. **No data loss:** Always have full replication
+
+**Trade-off:** Slower, but production-safe.
+
+### Q6: How do you estimate completion time?
+
+**Answer:**
+**Based on progress percentage:**
+```python
+elapsed_time = current_time - start_time
+estimated_total_time = (elapsed_time * 100) / progress_percent
+estimated_remaining = estimated_total_time - elapsed_time
+```
+
+**Example:**
+```
+Start: 10:00
+Current: 10:02 (2 min elapsed)
+Progress: 40%
+
+Estimated total: 2 / 0.4 = 5 minutes
+Remaining: 5 - 2 = 3 minutes
+ETA: 10:05
+```
+
+**Accuracy considerations:**
+- Phase 2 (catch-up) is variable
+- Network/disk speed affects accuracy
+- Gets more accurate as progress increases
+
+### Q7: What's the difference between partition reassignment and replication?
+
+**Answer:**
+
+| Aspect | Replication (Task 11) | Reassignment (Task 14) |
+|--------|----------------------|------------------------|
+| Purpose | Keep replicas in sync | Change replica set |
+| Duration | Continuous | Temporary |
+| Trigger | Automatic (leader writes) | Manual (admin command) |
+| Throttling | No (production traffic) | Yes (background task) |
+| Phases | Single (replicate) | Multi (add, wait, remove) |
+
+**Relationship:**
+- Reassignment **uses** replication for catch-up
+- Replication is the mechanism
+- Reassignment is the orchestration
+
+### Q8: How does this compare to Kafka's reassignment?
+
+**Answer:**
+
+**Similarities:**
+- Multi-phase process
+- Bandwidth throttling
+- Pull-based replication
+- Progress monitoring
+
+**Differences:**
+
+| Feature | Our Implementation | Kafka |
+|---------|-------------------|-------|
+| API | Programmatic | kafka-reassign-partitions.sh script |
+| Throttling | Per-partition + global | Per-broker + global |
+| Monitoring | Real-time metrics | JMX + logs |
+| Cancellation | Built-in | Complex (modify config) |
+
+**Key advantage:** Our API is simpler (programmatic vs shell script).
+
+## Lessons Learned
+
+1. **Multi-phase is essential** - safety over speed
+2. **Throttling prevents disasters** - unthrottled replication kills clusters
+3. **Progress visibility matters** - users need to know ETA
+4. **Failure handling is complex** - many edge cases
+5. **Token bucket is elegant** - allows bursts, enforces averages
+6. **Async processing scales** - handle many partitions concurrently
+7. **Staged processing helps** - don't reassign 1000 partitions at once
+
+## Comparable Systems
+
+- **Kafka:** Very similar reassignment process
+- **Cassandra:** Uses "nodetool move" for token rebalancing
+- **CockroachDB:** Automatic rebalancing with throttling
+- **Elasticsearch:** Shard allocation with throttling
+- **Ceph:** Rebalancing with bandwidth limits
+
+---
+
+**Document Version:** 13.0  
 **Last Updated:** January 16, 2026  
 **Next Update:** After exactly-once semantics and transactional writes

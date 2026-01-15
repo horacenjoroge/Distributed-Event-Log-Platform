@@ -686,7 +686,54 @@ Phase 4 (Future): Production Hardening
 
 ---
 
+#### Task 14: feat/partition-reassignment (COMPLETED)
+**Completion Date:** January 16, 2026
+**Commits:** 6 commits (frequent commit pattern)
+
+**Deliverables:**
+- [x] Reassignment data structures and state tracking
+- [x] Multi-phase reassignment executor (add, wait, remove)
+- [x] Bandwidth throttling (token bucket algorithm)
+- [x] Progress monitoring and metrics
+- [x] Manual reassignment API
+- [x] Comprehensive tests (40+ test cases)
+
+**Commits Made:**
+1. feat(reassignment): add reassignment data structures and state tracking
+2. feat(reassignment): implement multi-phase reassignment executor
+3. feat(reassignment): implement replication bandwidth throttling
+4. feat(reassignment): add progress monitoring and metrics
+5. test(reassignment): add comprehensive test suite
+6. docs(reassignment): update documentation with concepts and Q&A
+
+**Features Implemented:**
+- ReassignmentState with phase tracking (7 phases)
+- ReassignmentTracker for managing active/completed reassignments
+- ReassignmentExecutor with 3-phase orchestration
+- ReplicationThrottle with token bucket algorithm
+- PartitionThrottleManager for global + per-partition limits
+- ReassignmentMonitor with real-time metrics
+- Start/cancel/status reassignment API
+- Progress percentage tracking (0-100%)
+- Completion time estimation
+- Bytes replicated tracking
+- Error handling and cancellation support
+- Catch-up timeout (5 minutes default)
+- Configurable throttle rates (10 MB/s global, 1 MB/s per partition)
+
+**Files Created:** 9 files, 1,700+ lines
+
+**Key Concepts Implemented:**
+- Multi-phase reassignment (add → wait → remove)
+- Token bucket throttling for bandwidth control
+- Pull-based replication for catch-up
+- Real-time progress monitoring
+- Safe rollback before final phase
+- Concurrent reassignment support
+
+---
+
 **Last Updated:** January 16, 2026  
-**Current Sprint:** Phase 2 - Replication and Fault Tolerance  
-**Next Sprint:** Phase 3 - Advanced Features (Tasks 14-15)
-**Progress:** 13/15 tasks complete (87%)
+**Current Sprint:** Phase 2 - Complete!  
+**Next Sprint:** Phase 3 - Advanced Semantics (Task 15)
+**Progress:** 14/15 tasks complete (93%)
