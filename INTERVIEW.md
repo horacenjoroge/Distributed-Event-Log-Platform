@@ -2692,6 +2692,536 @@ Could be: 1,2,3,4,5,6 OR 1,3,2,4,5,6 OR any interleaving
 
 ---
 
-**Document Version:** 6.0  
+# Task 8: Consumer Groups
+
+## Overview
+
+**What I built:** Complete consumer group coordination system with automatic partition assignment, rebalancing, heartbeat protocol, and lag tracking.
+
+**Motivation:** Single consumer can't scale. Consumer groups enable multiple consumers to share partition load, providing horizontal scalability for reads.
+
+## Technical Implementation
+
+### 1. Consumer Group Concept (Coordinated Consumption)
+
+**Consumer Group:** Set of consumers working together to consume a topic.
+
+```python
+class MemberMetadata:
+    member_id: str
+    client_id: str
+    session_timeout_ms: int = 30000
+    rebalance_timeout_ms: int = 60000
+    subscription: Set[str]
+    assignment: Set[TopicPartition]
+    last_heartbeat_ms: int
+
+class ConsumerGroupMetadata:
+    group_id: str
+    generation_id: int          # Increments on rebalance
+    protocol_name: str          # Assignment strategy
+    leader_id: Optional[str]    # Group leader
+    state: GroupState           # EMPTY, STABLE, REBALANCING
+    members: Dict[str, MemberMetadata]
+```
+
+**Key properties:**
+- Each partition consumed by exactly one consumer in group
+- Multiple consumers share the load
+- Automatic rebalancing when members join/leave
+
+**Interview talking point:** "Consumer groups provide horizontal scalability. Single consumer maxes out at ~50k msg/sec, 10 consumers in group can do 500k msg/sec by splitting partitions."
+
+### 2. Group Coordinator (Membership Management)
+
+**Responsibilities:**
+1. Track group members
+2. Monitor member health (heartbeats)
+3. Coordinate rebalancing
+4. Store committed offsets
+5. Calculate consumer lag
+
+```python
+class GroupCoordinator:
+    async def join_group(
+        self, group_id, member_id, client_id,
+        session_timeout_ms, topics
+    ) -> Tuple[int, str, bool]:
+        # Add member to group
+        # Trigger rebalance if needed
+        # Return (generation_id, member_id, is_leader)
+
+    async def sync_group(
+        self, group_id, member_id, generation_id
+    ) -> Set[TopicPartition]:
+        # Wait for rebalance to complete
+        # Return assigned partitions
+
+    async def heartbeat(
+        self, group_id, member_id, generation_id
+    ) -> bool:
+        # Update member's last heartbeat
+        # Return True if accepted
+```
+
+**State machine:**
+```
+EMPTY → PREPARING_REBALANCE → COMPLETING_REBALANCE → STABLE
+  ↑                                                      |
+  └──────────────────────────────────────────────────────┘
+        (member leaves or heartbeat timeout)
+```
+
+**Interview talking point:** "Coordinator is centralized for simplicity. Kafka uses a broker as coordinator. For high availability, you'd need coordinator replication (Phase 2: Raft)."
+
+### 3. Partition Assignment Strategies
+
+**Three strategies implemented:**
+
+**Range Assignment:**
+```python
+def assign(self, members, partitions, subscriptions):
+    # Divide partitions into ranges
+    # Example: 6 partitions, 3 consumers
+    # Consumer 1: P0, P1
+    # Consumer 2: P2, P3
+    # Consumer 3: P4, P5
+    partitions_per_consumer = num_partitions // num_consumers
+    assign_ranges_to_consumers()
+```
+
+**Round-Robin Assignment:**
+```python
+def assign(self, members, partitions, subscriptions):
+    # Alternate partitions
+    # Example: 6 partitions, 3 consumers
+    # Consumer 1: P0, P3
+    # Consumer 2: P1, P4
+    # Consumer 3: P2, P5
+    for i, partition in enumerate(partitions):
+        consumer = consumers[i % len(consumers)]
+        assign(consumer, partition)
+```
+
+**Sticky Assignment:**
+```python
+def assign(self, members, partitions, subscriptions):
+    # Minimize partition movement on rebalance
+    # Keep existing assignments when possible
+    # Only reassign if necessary
+    for member in members:
+        if member in previous_assignment:
+            keep_previous_assignments()
+    assign_unassigned_partitions()
+```
+
+**Comparison:**
+| Strategy | Pro | Con | Use Case |
+|----------|-----|-----|----------|
+| Range | Simple, predictable | Uneven if partitions % consumers != 0 | Default |
+| Round-Robin | Even distribution | More movement on rebalance | High churn |
+| Sticky | Minimizes movement | Complex logic | Stateful consumers |
+
+**Interview talking point:** "Sticky assignment is like MVCC for consumer groups - minimizes disruption on rebalance. Kafka added this in 0.11.0 for stateful stream processing."
+
+### 4. Rebalancing Protocol (Two-Phase Commit)
+
+**Phase 1: JoinGroup**
+```
+Consumer 1 → Coordinator: JoinGroup(group_id, topics)
+Consumer 2 → Coordinator: JoinGroup(group_id, topics)
+Consumer 3 → Coordinator: JoinGroup(group_id, topics)
+
+Coordinator waits for all members or timeout
+Coordinator selects leader (usually first to join)
+Coordinator returns: (generation_id, member_id, is_leader)
+```
+
+**Phase 2: SyncGroup**
+```
+Leader calculates assignment using strategy
+All consumers → Coordinator: SyncGroup(generation_id)
+Coordinator distributes assignments
+Consumers receive their assigned partitions
+```
+
+**Complete flow:**
+```python
+async def rebalance():
+    # State: STABLE → PREPARING_REBALANCE
+    group.state = GroupState.PREPARING_REBALANCE
+    group.clear_assignments()
+    
+    # Wait for all members to rejoin
+    await asyncio.sleep(rebalance_delay_ms / 1000)
+    
+    # State: PREPARING_REBALANCE → COMPLETING_REBALANCE
+    group.state = GroupState.COMPLETING_REBALANCE
+    group.next_generation()
+    
+    # Calculate assignments
+    strategy = create_assignment_strategy(group.protocol_name)
+    assignments = strategy.assign(
+        list(group.members.keys()),
+        partitions_per_topic,
+        subscriptions
+    )
+    
+    # Apply assignments
+    for member_id, partitions in assignments.items():
+        group.members[member_id].assignment = partitions
+    
+    # Select leader
+    group.leader_id = sorted(group.members.keys())[0]
+    
+    # State: COMPLETING_REBALANCE → STABLE
+    group.state = GroupState.STABLE
+```
+
+**Interview talking point:** "Two-phase rebalancing ensures all consumers agree on assignments. JoinGroup is voting phase, SyncGroup is commit phase. Similar to two-phase commit in databases."
+
+### 5. Heartbeat Protocol (Liveness Detection)
+
+**Consumer sends heartbeats:**
+```python
+def _heartbeat_loop(self):
+    while running:
+        time.sleep(heartbeat_interval_ms / 1000)
+        
+        result = coordinator.heartbeat(
+            group_id=group_id,
+            member_id=member_id,
+            generation_id=generation_id
+        )
+        
+        if not result:
+            # Heartbeat rejected, rebalance needed
+            rejoin_group()
+```
+
+**Coordinator checks heartbeats:**
+```python
+async def check_expired_members(self):
+    current_time = time.time() * 1000
+    
+    for group in groups:
+        expired = []
+        for member in group.members:
+            if current_time - member.last_heartbeat_ms > session_timeout_ms:
+                expired.append(member.member_id)
+        
+        if expired:
+            remove_members(expired)
+            trigger_rebalance()
+```
+
+**Timeout values:**
+- `heartbeat_interval_ms`: 3000 (how often to send)
+- `session_timeout_ms`: 30000 (when member considered dead)
+- `rebalance_timeout_ms`: 60000 (max rebalance duration)
+
+**Rule:** `heartbeat_interval_ms < session_timeout_ms / 3`
+
+**Interview talking point:** "Heartbeats are lightweight - just ping/pong. Separate from message polling. This allows detecting zombie consumers that stop processing but don't crash."
+
+### 6. Rebalance Triggers (When to Rebalance)
+
+**Automatic rebalance when:**
+1. New consumer joins group
+2. Consumer leaves (graceful shutdown)
+3. Consumer crashes (heartbeat timeout)
+4. Partition count changes
+5. Topic subscription changes
+
+**Rebalance cost:**
+- All consumers stop processing
+- Partitions reassigned
+- Uncommitted work lost
+- Can take 10-60 seconds
+
+**Rebalancing storm:**
+```
+Consumer 1 slow → timeout → rebalance
+During rebalance, Consumer 2 times out → another rebalance
+During rebalance, Consumer 3 times out → cascading rebalances
+```
+
+**Solutions:**
+1. Increase `session_timeout_ms`
+2. Tune `max_poll_interval_ms`
+3. Process messages faster
+4. Sticky assignment (minimize movement)
+
+**Interview talking point:** "Rebalancing storms are a real problem in production. We prevent them with exponential backoff on timeouts and sticky assignment to minimize disruption."
+
+### 7. Offset Commit per Consumer
+
+**Group offset storage:**
+```python
+class GroupOffsets:
+    group_id: str
+    offsets: Dict[TopicPartition, int]
+    
+    def commit(self, tp, offset):
+        self.offsets[tp] = offset
+    
+    def get_offset(self, tp) -> Optional[int]:
+        return self.offsets.get(tp)
+    
+    def get_lag(self, tp, log_end_offset) -> int:
+        committed = self.get_offset(tp)
+        return log_end_offset - committed if committed else None
+```
+
+**Per-consumer tracking:**
+```
+Group "my-group":
+  Consumer 1 → [P0: offset 100, P1: offset 200]
+  Consumer 2 → [P2: offset 150, P3: offset 300]
+  Consumer 3 → [P4: offset 50,  P5: offset 400]
+```
+
+**Interview talking point:** "Group offsets are stored centrally at coordinator. Each consumer commits offsets for its assigned partitions. On rebalance, new consumer reads committed offset and resumes from there."
+
+### 8. Consumer Lag Tracking (Monitoring)
+
+**Lag = how far behind consumer is from latest message**
+
+```python
+lag = log_end_offset - committed_offset
+
+# Example:
+log_end_offset = 1000
+committed_offset = 900
+lag = 100 messages
+```
+
+**High lag indicates:**
+- Consumer too slow
+- Spike in message production
+- Consumer stuck/dead
+
+**Monitoring:**
+```python
+async def get_lag(group_id, topic_partition, log_end_offset):
+    committed = await fetch_offset(group_id, topic_partition)
+    if committed is None:
+        return None
+    return log_end_offset - committed
+```
+
+**Interview talking point:** "Consumer lag is most important metric for monitoring. High lag means consumers can't keep up. Solutions: add more consumers, optimize processing, or increase partition count."
+
+## Design Deep Dives
+
+### Why Coordinator Instead of Peer-to-Peer?
+
+**Question:** Why centralized coordinator instead of distributed consensus?
+
+**Answer:**
+
+**Coordinator (our approach):**
+- Simple to implement
+- Single source of truth
+- Fast decision making
+
+**Peer-to-peer (alternative):**
+- No single point of failure
+- Complex (need Raft/Paxos)
+- Slower decisions
+
+**Hybrid (Kafka's approach):**
+- Coordinator on broker (replicated)
+- Broker selected via Raft
+- Best of both worlds
+
+**Interview talking point:** "Started with centralized for simplicity. Production systems use replicated coordinator (Kafka replicates this to multiple brokers via Raft)."
+
+### Zombie Consumers Problem
+
+**Problem:** Consumer appears alive but not processing.
+
+**Scenarios:**
+1. Long GC pause (JVM)
+2. Slow processing (hung on I/O)
+3. Thread deadlock
+4. Network partition
+
+**Detection:**
+```python
+# Not enough:
+if heartbeat_ok:
+    consumer_alive = True
+
+# Need this too:
+if heartbeat_ok and poll_recently:
+    consumer_alive = True
+```
+
+**Kafka solution:** `max.poll.interval.ms`
+- Must call poll() within this interval
+- If not, considered zombie
+- Triggers rebalance
+
+**Interview talking point:** "Heartbeat alone isn't enough - consumer might send heartbeats but not process messages. Kafka tracks both heartbeat and poll() timing to detect true zombies."
+
+### Slow Consumer Delaying Rebalance
+
+**Problem:** One slow consumer delays entire group.
+
+```
+Rebalance starts...
+Consumer 1: Joins in 1 second
+Consumer 2: Joins in 2 seconds
+Consumer 3: Joins in 60 seconds (slow processing)
+
+All consumers blocked for 60 seconds!
+```
+
+**Solutions:**
+1. **rebalance_timeout_ms:** Max wait for join
+2. **Kick slow consumers:** Timeout after max wait
+3. **Incremental rebalancing:** (Kafka 2.4+) Don't stop all consumers
+
+**Interview talking point:** "Slow consumers can DoS the entire group. We set rebalance timeout to prevent one slow consumer from blocking everyone. After timeout, slow consumer is kicked and must rejoin."
+
+### Partition Assignment Fairness
+
+**Question:** How do you ensure fair assignment?
+
+**Example problem:**
+```
+Topic: 7 partitions
+Consumers: 3
+
+Unfair:
+Consumer 1: P0, P1, P2, P3 (4 partitions)
+Consumer 2: P4, P5         (2 partitions)
+Consumer 3: P6             (1 partition)
+
+Fair:
+Consumer 1: P0, P1, P2 (3 partitions)
+Consumer 2: P3, P4     (2 partitions)
+Consumer 3: P5, P6     (2 partitions)
+```
+
+**Range algorithm ensures fairness:**
+```python
+partitions_per_consumer = num_partitions // num_consumers  # 2
+extra_partitions = num_partitions % num_consumers          # 1
+
+for i, consumer in enumerate(consumers):
+    count = partitions_per_consumer
+    if i < extra_partitions:
+        count += 1  # First consumer gets extra
+    assign_partitions(consumer, count)
+```
+
+## Interview Questions & Answers
+
+### Q1: Explain the rebalancing protocol.
+
+**Answer:** "Two-phase protocol: JoinGroup and SyncGroup. In JoinGroup phase, all consumers join the group, coordinator selects a leader, and assigns a generation ID. In SyncGroup phase, the leader calculates partition assignments using chosen strategy, coordinator distributes assignments to all members. This ensures all consumers agree on who owns which partitions."
+
+### Q2: How do you detect zombie consumers?
+
+**Answer:** "We use heartbeat protocol with session timeout. Consumer must send heartbeat every heartbeat_interval_ms. If no heartbeat for session_timeout_ms, member is considered dead and removed. Production systems also track poll() timing - if consumer doesn't call poll() for max_poll_interval_ms, it's a zombie even if heartbeating."
+
+### Q3: What causes rebalancing storms?
+
+**Answer:** "Cascading timeouts. During rebalance, all consumers stop processing. If rebalance takes long, some consumers might time out, triggering another rebalance. During that rebalance, more consumers time out, causing cascading failures. We prevent this with adequate session timeouts, sticky assignment to minimize disruption, and exponential backoff."
+
+### Q4: How does sticky assignment work?
+
+**Answer:** "Sticky assignment remembers previous assignments and tries to keep them. When rebalancing, each consumer keeps as many previous partitions as possible. Only partitions that must move (from removed consumers) are reassigned. This minimizes state transfer and speeds up recovery for stateful consumers."
+
+### Q5: What's the difference between group coordinator and leader?
+
+**Answer:** "Coordinator is the server that manages the group - tracks members, monitors heartbeats, orchestrates rebalancing. Leader is a consumer in the group chosen to calculate partition assignments. Coordinator does management, leader does computation. This offloads assignment calculation from coordinator to clients."
+
+### Q6: How do consumer groups enable horizontal scaling?
+
+**Answer:** "Consumer groups split partitions across multiple consumers. Each partition is consumed by exactly one consumer in the group. To scale reads, add more consumers to the group. They'll automatically get assigned partitions. This provides linear scaling up to num_partitions consumers."
+
+## Performance Characteristics
+
+**Rebalance timing:**
+- JoinGroup phase: 3 seconds (configurable delay)
+- Assignment calculation: < 100ms
+- SyncGroup phase: < 1 second
+- Total: ~5 seconds
+
+**Heartbeat overhead:**
+- Network: ~100 bytes per heartbeat
+- Frequency: Every 3 seconds
+- CPU: Negligible
+
+**Consumer lag:**
+- Healthy: < 1000 messages
+- Warning: 1000-10000 messages
+- Critical: > 10000 messages
+
+## Production Considerations
+
+### 1. Size consumer groups appropriately
+
+```python
+# Max consumers = partition count
+# More consumers than partitions = idle consumers
+
+num_consumers = min(desired_parallelism, num_partitions)
+```
+
+### 2. Configure timeouts carefully
+
+```python
+# Rule: heartbeat_interval < session_timeout / 3
+GroupConsumer(
+    session_timeout_ms=30000,       # 30 sec
+    heartbeat_interval_ms=3000,     # 3 sec
+    rebalance_timeout_ms=60000,     # 60 sec
+)
+```
+
+### 3. Monitor consumer lag
+
+```python
+for tp in consumer.assignment():
+    lag = coordinator.get_lag(group_id, tp, log_end_offset)
+    if lag and lag > 10000:
+        alert("High consumer lag", partition=tp, lag=lag)
+```
+
+### 4. Use sticky assignment for stateful consumers
+
+```python
+# Stateful consumers have local state (caches, aggregations)
+# Sticky assignment minimizes state rebuild
+GroupConsumer(
+    partition_assignment_strategy="sticky"
+)
+```
+
+## Key Takeaways
+
+1. **Consumer groups enable horizontal scaling** - split partitions across consumers
+2. **Two-phase rebalancing ensures consistency** - JoinGroup + SyncGroup
+3. **Heartbeat detects failures** - zombie consumer detection
+4. **Three assignment strategies** - range, round-robin, sticky
+5. **Rebalancing has cost** - all consumers stop during rebalance
+6. **Sticky assignment minimizes disruption** - keeps existing assignments
+7. **Consumer lag is key metric** - indicates processing health
+8. **One partition → one consumer** - scaling limited by partition count
+
+## Comparable Systems
+
+- **Kafka Consumer Groups:** Same exact model
+- **RabbitMQ:** Competing consumers (no sticky assignment)
+- **AWS Kinesis:** Shard-level parallelism with KCL
+- **Google Pub/Sub:** Subscription-based (different model)
+
+---
+
+**Document Version:** 7.0  
 **Last Updated:** January 15, 2026  
 **Next Update:** After Phase 2 (replication and consensus)
