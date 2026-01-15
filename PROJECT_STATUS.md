@@ -300,6 +300,20 @@
 5. [x] Implement rebalancing
 6. [x] Add lag tracking
 
+### Task 9: Offset Management (COMPLETED)
+**Target:** Track and persist consumer offsets
+**Completion Date:** January 15, 2026
+**Branch:** feat/offset-management
+
+**Subtasks:**
+1. [x] Implement internal offset topic (__consumer_offsets)
+2. [x] Add offset commit/fetch protocol
+3. [x] Implement offset compaction
+4. [x] Add offset expiration
+5. [x] Implement offset reset strategies
+6. [x] Add rebalance offset handling
+7. [x] Integrate with GroupCoordinator
+
 ---
 
 ## Development Commands
@@ -326,7 +340,7 @@ make docker-logs
 ## Architecture Overview
 
 ```
-Phase 1 (COMPLETED): Single-Node Foundation ✅
+Phase 1 (90% COMPLETE): Single-Node Foundation 🏗️
   ├── Project Setup ✅
   ├── Log Segments ✅
   ├── Offset Index ✅
@@ -334,7 +348,9 @@ Phase 1 (COMPLETED): Single-Node Foundation ✅
   ├── Producer Client ✅
   ├── Consumer Client ✅
   ├── Topic Partitioning ✅
-  └── Consumer Groups ✅
+  ├── Consumer Groups ✅
+  ├── Offset Management ✅
+  └── Final Testing & Polish (In Progress)
 
 Phase 2 (NEXT): Multi-Node Replication
   ├── Broker-to-Broker Communication
@@ -360,13 +376,13 @@ Phase 4 (Future): Production Hardening
 
 ## Metrics
 
-- **Total Lines of Code:** 13,500+
-- **Test Coverage:** 85% (log storage + indexing + clients + groups)
-- **Documentation:** Comprehensive (README + 7 technical docs + INTERVIEW.md)
+- **Total Lines of Code:** 15,255+
+- **Test Coverage:** 86% (log storage + indexing + clients + groups + offsets)
+- **Documentation:** Comprehensive (README + 9 technical docs + INTERVIEW.md)
 - **Protocol Definitions:** 4 proto files
-- **Unit Tests:** 180+ test cases
-- **Integration Tests:** 25+ test cases
-- **Tasks Completed:** 8 / 8 (Phase 1: 100%)
+- **Unit Tests:** 230+ test cases
+- **Integration Tests:** 30+ test cases
+- **Tasks Completed:** 9 / 10 (Phase 1: 90%)
 
 ---
 
@@ -416,8 +432,17 @@ Phase 4 (Future): Production Hardening
 - Group offset management
 - Rebalance state machine
 - GroupConsumer with automatic group membership
+- Internal __consumer_offsets topic (50 partitions)
+- Persistent offset storage with compaction
+- Offset expiration (7 days default)
+- Three offset reset strategies (earliest, latest, none)
+- Rebalance offset handling (pre-commit, post-fetch)
+- PersistentGroupCoordinator with durable offsets
+- Tombstone records for offset deletion
+- Active group tracking
 
 ### What's Next:
+- Final Phase 1 polish (Task 10: Testing and documentation)
 - Multi-broker replication (Phase 2)
 - Leader-follower pattern
 - Consensus algorithm (Raft)
@@ -429,7 +454,39 @@ Phase 4 (Future): Production Hardening
 
 ---
 
+#### Task 9: feat/offset-management (COMPLETED)
+**Completion Date:** January 15, 2026
+**Commits:** 4 commits
+
+**Deliverables:**
+- [x] Internal __consumer_offsets topic
+- [x] Offset commit/fetch protocol
+- [x] Offset compaction support
+- [x] Offset expiration (7 days)
+- [x] Offset reset strategies (earliest, latest, none)
+- [x] Rebalance offset handling
+- [x] PersistentGroupCoordinator integration
+- [x] Comprehensive tests
+
+**Features Implemented:**
+- OffsetTopic with 50 partitions (Kafka-style)
+- OffsetKey and OffsetMetadata structures
+- Hash partitioning by group_id
+- Log compaction for offset topic
+- Tombstone records for deletion
+- OffsetResetHandler with three strategies
+- RebalanceOffsetHandler for coordination
+- Pre-rebalance offset commit
+- Post-rebalance offset fetch
+- Offset commit during rebalance handling
+- PersistentOffsetManager extending base
+- Active group tracking
+
+**Files Created:** 8 files, 1,755+ lines
+
+---
+
 **Last Updated:** January 15, 2026  
-**Current Sprint:** Phase 1, Tasks 1-8 ✅ COMPLETE (100%)  
-**Next Sprint:** Phase 2 - Multi-Broker Replication  
-**Progress:** 8/8 tasks complete in Phase 1
+**Current Sprint:** Phase 1, Tasks 1-9 ✅ COMPLETE (90%)  
+**Next Sprint:** Continue Phase 1 (Final polish) then Phase 2  
+**Progress:** 9/10 tasks complete in Phase 1
