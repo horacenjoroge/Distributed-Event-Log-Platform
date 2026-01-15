@@ -2407,6 +2407,291 @@ for tp in consumer.assignment():
 
 ---
 
-**Document Version:** 5.0  
+---
+
+# Task 7: Topic Partitioning
+
+## Overview
+
+**What I built:** Topic and partition management system for splitting data across multiple partitions for parallelism.
+
+**Motivation:** Single log doesn't scale. Partitioning enables parallel writes, parallel reads, and horizontal scaling.
+
+## Technical Implementation
+
+### 1. Topic Metadata (Logical Organization)
+
+**Topic:** Named feed of messages (e.g., "user-events")
+**Partition:** Ordered, immutable sequence within a topic
+
+```python
+class TopicConfig:
+    name: str
+    num_partitions: int = 1
+    replication_factor: int = 1
+    retention_hours: int = -1
+    retention_bytes: int = -1
+    segment_bytes: int = 1GB
+    segment_ms: int = 7days
+
+class PartitionInfo:
+    topic: str
+    partition: int
+    leader: int              # Which broker leads
+    replicas: List[int]      # Which brokers have copies
+    isr: List[int]           # In-sync replicas
+```
+
+**Key insight:** Topic is logical concept, partitions are physical storage units.
+
+### 2. Partition Naming Convention
+
+```
+topic-name/partition-0/
+topic-name/partition-1/
+topic-name/partition-2/
+```
+
+Each partition has its own:
+- Log segments
+- Offset index
+- Retention policy
+
+**Interview talking point:** "Kafka uses same naming: topic-partition format. Each partition is independent log with own offset space."
+
+### 3. Key-Based Partitioning (Consistent Hashing)
+
+```python
+def calculate_partition(key: bytes, num_partitions: int) -> int:
+    hash_value = int(hashlib.md5(key).hexdigest(), 16)
+    return hash_value % num_partitions
+```
+
+**Properties:**
+- Same key → same partition (ordering guarantee)
+- Evenly distributes keys
+- Deterministic
+
+**Example:**
+```
+Key "user-123" → hash → 0x4af... → % 10 → partition 3
+Key "user-456" → hash → 0x1bc... → % 10 → partition 7
+Key "user-123" → hash → 0x4af... → % 10 → partition 3 (same!)
+```
+
+**Interview talking point:** "Hash-based partitioning provides ordering per key while allowing parallelism across keys. Critical for maintaining message order where it matters."
+
+### 4. Producer Partition Selection
+
+**Already implemented in Producer:**
+```python
+class DefaultPartitioner:
+    def partition(self, topic, key, value, num_partitions):
+        if key is not None:
+            return hash(key) % num_partitions  # Sticky to partition
+        else:
+            return round_robin()  # Load balance
+```
+
+**Integration with topics:**
+```python
+# Producer checks partition count
+partition_count = topic_service.get_partition_count(topic)
+partition = partitioner.partition(topic, key, value, partition_count)
+
+# Write to specific partition
+log = topic_service.get_or_create_partition(topic, partition)
+log.append(key, value)
+```
+
+### 5. Consumer Partition Assignment
+
+**Consumer gets assigned partitions:**
+```python
+topic_metadata = topic_service.get_topic("my-topic")
+assigned_partitions = [0, 2, 4]  # Consumer 1 gets these
+
+for partition in assigned_partitions:
+    log = topic_service.get_partition_log("my-topic", partition)
+    messages = log.read(start_offset=0)
+```
+
+**Assignment strategies:**
+- **Range:** Partitions 0-3 → Consumer A, 4-7 → Consumer B
+- **Round-robin:** P0→CA, P1→CB, P2→CA, P3→CB
+- **Sticky:** Minimize reassignment on rebalance
+
+### 6. Partition Scaling (Add Partitions)
+
+```python
+# Start with 3 partitions
+topic_service.create_topic("my-topic", num_partitions=3)
+
+# Scale to 10 partitions
+topic_service.add_partitions("my-topic", num_partitions=10)
+```
+
+**What happens:**
+1. New partition directories created
+2. New logs initialized
+3. Producer sees more partitions
+4. Consumer gets reassigned
+
+**Limitation:** Can't reduce partitions (would lose data)
+
+### 7. Partition Assignment to Brokers (Round-Robin)
+
+```python
+def assign_partitions_round_robin(
+    num_partitions=6,
+    num_brokers=3,
+    replication_factor=2
+):
+    assignments = []
+    for partition in range(num_partitions):
+        replicas = []
+        for i in range(replication_factor):
+            broker = (partition + i) % num_brokers
+            replicas.append(broker)
+        assignments.append(replicas)
+    return assignments
+
+# Result:
+# P0: [0, 1]
+# P1: [1, 2]
+# P2: [2, 0]
+# P3: [0, 1]
+# P4: [1, 2]
+# P5: [2, 0]
+```
+
+**Even distribution** across brokers.
+
+## Design Deep Dives
+
+### Why Hash Instead of Range Partitioning?
+
+**Question:** Why use hash(key) % N instead of key ranges?
+
+**Answer:**
+- **Hash:** Even distribution, no hot partitions
+- **Range:** Can optimize for sequential access, but creates hot partitions
+
+**Example problem with range:**
+```
+Partition 0: keys 0-999
+Partition 1: keys 1000-1999
+Partition 2: keys 2000-2999
+
+If all users are user-1000 to user-1500, only Partition 1 is used!
+```
+
+**Hash solves this:** Even if IDs are sequential, hash distributes evenly.
+
+### Hot Partitions Problem
+
+**Problem:** One key gets all traffic.
+
+**Example:**
+```python
+# Celebrity user generates 90% of events
+key = b"celebrity-user-id"
+partition = hash(key) % 10  # Always partition 3
+
+# Partition 3 is overwhelmed, others idle
+```
+
+**Solutions:**
+1. **Composite keys:** `f"{user_id}:{timestamp}"`
+2. **Sub-partition:** Split hot key across multiple partitions
+3. **More partitions:** Spread other keys better
+4. **Custom partitioner:** Special handling for known hot keys
+
+**Interview talking point:** "Hot partitions are inevitable with skewed data. Kafka's solution: monitor and use composite keys or custom partitioners."
+
+### Partition Count Changes (Rehashing)
+
+**Problem:** Adding partitions changes hash distribution.
+
+**Before (3 partitions):**
+```
+key "A" → hash % 3 → partition 1
+key "B" → hash % 3 → partition 2
+```
+
+**After (5 partitions):**
+```
+key "A" → hash % 5 → partition 3 (different!)
+key "B" → hash % 5 → partition 0 (different!)
+```
+
+**Impact:**
+- New messages go to different partitions
+- Breaks ordering guarantee across scale-out
+
+**Solution:**
+- **Don't rely on global ordering** (only per-key)
+- New partitions only get new keys
+- Old keys continue to old partitions (if using consistent hashing)
+
+**Interview talking point:** "This is why partition count should be set high initially. Kafka recommends num_partitions = expected_throughput / desired_partition_throughput."
+
+### Ordering Guarantees
+
+**Question:** What ordering guarantees exist?
+
+**Answer:**
+1. **Within partition:** Total order (offset-based)
+2. **Within key:** Total order (same key → same partition)
+3. **Across partitions:** NO ordering guarantee
+
+**Example:**
+```
+Partition 0: [msg1, msg2, msg5]
+Partition 1: [msg3, msg4, msg6]
+
+Global order: Unknown!
+Could be: 1,2,3,4,5,6 OR 1,3,2,4,5,6 OR any interleaving
+```
+
+**Implication:** If you need global order, use 1 partition (but sacrifices parallelism).
+
+## Interview Questions & Answers
+
+### Q1: How do you partition messages?
+
+**Answer:** "Use hash(key) % num_partitions for keyed messages. This ensures same key always goes to same partition, maintaining ordering per key. For keyless messages, use round-robin to balance load. Hash-based is better than range-based because it prevents hot partitions."
+
+### Q2: What happens when you add partitions?
+
+**Answer:** "New partitions are created with new logs. Existing partitions unchanged. Hash distribution changes (hash % 3 vs hash % 5), so new messages for same key might go to different partitions. This breaks per-key ordering for new messages. That's why partition count should be set high initially."
+
+### Q3: How do you handle hot partitions?
+
+**Answer:** "Monitor partition throughput. For hot keys, use composite keys like user_id:timestamp or implement custom partitioner. Can also increase partition count so other keys distribute better. In extreme cases, split hot key's messages across multiple partitions."
+
+### Q4: What ordering guarantees do partitions provide?
+
+**Answer:** "Strict ordering within a partition (by offset). Messages with same key maintain order (same partition). No ordering guarantee across partitions. If you need global order, use single partition, but this limits throughput to single writer/reader."
+
+## Key Takeaways
+
+1. **Partitioning enables parallelism** - multiple writers, multiple readers
+2. **Hash-based partitioning** - even distribution, per-key ordering
+3. **Topics are logical, partitions are physical** - topic is just a collection of partitions
+4. **Partition count hard to change** - set high initially
+5. **Hot partitions are real problem** - monitor and use composite keys
+6. **No global ordering** - only per-partition and per-key
+
+## Comparable Systems
+
+- **Kafka:** Same partitioning model (topics → partitions)
+- **Pulsar:** Similar but adds "bundles" for load balancing
+- **Kinesis:** "Shards" instead of partitions
+- **RabbitMQ:** Doesn't use partitions (different model)
+
+---
+
+**Document Version:** 6.0  
 **Last Updated:** January 15, 2026  
 **Next Update:** After Phase 2 (replication and consensus)
