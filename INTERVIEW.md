@@ -3911,6 +3911,526 @@ controller = brokers[0]
 
 ---
 
-**Document Version:** 9.0  
+# Task 11: Leader-Follower Replication
+
+## What I Built
+
+Implemented **leader-follower replication** with In-Sync Replicas (ISR) tracking and high-water mark (HWM) management - the foundation for data durability and fault tolerance.
+
+### Components
+
+#### 1. Replica Management (`replica.py`)
+```
+ReplicaInfo
+├── Broker ID, topic, partition
+├── Log end offset tracking
+├── Last fetch time tracking
+├── Replica state (online, offline, syncing, in_sync)
+└── Lag calculation (offset lag, time lag)
+
+PartitionReplicaSet
+├── Leader and follower replicas
+├── In-Sync Replicas (ISR) set
+├── High-water mark calculation
+├── Dynamic ISR updates
+└── Under-replication detection
+
+ReplicaManager
+├── Manage partition replicas
+├── Track ISR per partition
+├── Update follower offsets
+└── Health check (remove lagging replicas)
+```
+
+#### 2. Follower Fetch Protocol (`fetcher.py`)
+```
+ReplicationFetcher (follower side)
+├── Pull-based replication
+├── Continuous fetch loops per partition
+├── Offset tracking
+└── Backoff on errors
+
+LeaderReplicationManager (leader side)
+├── Handle fetch requests from followers
+├── Track follower positions
+├── Serve log data
+└── Calculate follower lag
+```
+
+#### 3. Acknowledgment Modes (`ack.py`)
+```
+AckMode
+├── NONE (acks=0): Fire and forget
+├── LEADER (acks=1): Leader ack only
+└── ALL (acks=-1): Full ISR ack
+
+AckManager
+├── Wait for appropriate acks
+├── ISR replication waiting
+└── Timeout handling
+
+ReplicationMonitor
+├── Track under-replicated partitions
+├── Monitor replica lag
+└── ISR shrink/expand alerts
+```
+
+#### 4. Replication Coordination (`sync.py`)
+```
+ReplicationCoordinator
+├── Become leader/follower
+├── Start/stop replication
+├── Handle producer requests with replication
+├── Ensure min ISR for writes
+└── Coordinate ISR and HWM updates
+```
+
+## Core Concepts
+
+### In-Sync Replicas (ISR)
+
+**What:** Set of replicas that are fully caught up with the leader.
+
+**Criteria for ISR membership:**
+1. Offset lag ≤ `max_replica_lag` (default: 10 messages)
+2. Time lag ≤ `max_replica_lag_time_ms` (default: 10 seconds)
+
+**Why ISR matters:**
+- Only ISR replicas can become leader
+- Producer `acks=all` waits for ISR replication
+- Durability guarantee: data replicated to all ISR
+
+**Dynamic ISR:**
+- Replicas added when they catch up
+- Replicas removed when they lag
+- Leader always in ISR
+
+### High-Water Mark (HWM)
+
+**Definition:** Minimum log end offset among all ISR replicas.
+
+**Purpose:** Only messages below HWM are visible to consumers.
+
+**Example:**
+```
+Leader:     [0][1][2][3][4][5]  (offset 6)
+Follower 1: [0][1][2][3][4]     (offset 5)
+Follower 2: [0][1][2][3]        (offset 4)
+
+ISR = {Leader, Follower 1}
+HWM = min(6, 5) = 5
+
+Consumers can read up to offset 4 (HWM - 1)
+```
+
+**Why HWM:**
+- Ensures consumers only see committed data
+- Prevents reading uncommitted data if leader fails
+- Consistency across all consumers
+
+### Replication Flow
+
+```
+Producer sends message
+        ↓
+Leader appends to log (offset 100)
+        ↓
+Leader responds based on acks mode:
+├── acks=0: No wait (fire and forget)
+├── acks=1: Respond immediately
+└── acks=all: Wait for ISR replication
+        ↓
+Followers fetch from leader (pull model)
+        ↓
+Followers append to local logs
+        ↓
+Followers report new offset to leader
+        ↓
+Leader updates ISR
+        ↓
+Leader advances HWM
+        ↓
+Producer receives ack (if acks=all)
+```
+
+### Pull-Based Replication
+
+**Why pull instead of push?**
+
+1. **Follower controls rate** - prevents overwhelming slow followers
+2. **Simpler leader** - leader just serves reads
+3. **Batching** - followers can batch multiple offsets
+4. **Backpressure** - natural flow control
+
+**Trade-off:**
+- Latency: Pull has higher latency than push
+- Simplicity: Pull is simpler to implement and reason about
+
+## Design Decisions
+
+### 1. Sparse ISR Updates
+**Decision:** Update ISR on offset changes, not time-based polling.
+
+**Rationale:** More efficient, immediate reaction to lag changes.
+
+**Trade-off:** May miss time-based lag until next fetch.
+
+### 2. Leader Tracks Follower Offsets
+**Decision:** Leader maintains follower position map.
+
+**Rationale:** Enables lag calculation, ISR management, HWM calculation.
+
+**Trade-off:** Memory overhead, state to manage.
+
+### 3. Minimum ISR Requirement
+**Decision:** Configurable `min_isr` for writes (default: 1).
+
+**Rationale:** Balance availability vs durability.
+
+**Example:**
+- `min_isr=1`: Can write with just leader (high availability)
+- `min_isr=2`: Require 2 replicas (higher durability)
+- `min_isr=3`: Require 3 replicas (highest durability)
+
+### 4. Async Coordination
+**Decision:** All coordination is async with `asyncio`.
+
+**Rationale:** Handle thousands of partitions efficiently.
+
+**Trade-off:** More complex code, but scales better.
+
+## Deep End: The Hard Parts
+
+### 1. Follower Falling Behind
+
+**Problem:** Follower can't keep up with leader write rate.
+
+**Solution:**
+- Remove from ISR after `max_replica_lag_time_ms`
+- Follower continues syncing
+- Re-added to ISR when caught up
+
+**Edge case:** What if all followers fall behind?
+- ISR = {Leader}
+- Can still write with `acks=1`
+- Cannot write with `acks=all` and `min_isr=2`
+
+### 2. Acks=All vs Latency
+
+**Trade-off:**
+- `acks=all`: Higher durability, higher latency
+- `acks=1`: Lower latency, risk of data loss
+- `acks=0`: Lowest latency, no durability guarantee
+
+**Real-world:**
+- Kafka defaults to `acks=1`
+- Financial systems use `acks=all`
+- Metrics/logs often use `acks=0`
+
+### 3. Split ISR (Future Problem)
+
+**Scenario:** Network partition splits cluster.
+
+**Problem:** Two leaders for same partition?
+
+**Solution (not yet implemented):**
+- Leader epoch (incremental counter)
+- Controller coordination
+- Fencing (reject old leaders)
+
+### 4. Zombie Followers
+
+**Problem:** Dead follower still in ISR?
+
+**Solution:**
+- Heartbeat/fetch timeout removes from ISR
+- `max_replica_lag_time_ms` enforcement
+
+### 5. High-Water Mark Lag
+
+**Problem:** HWM can lag behind leader significantly.
+
+**Impact:** Consumer read lag increases.
+
+**Mitigation:**
+- Tune `max_replica_lag` lower
+- Increase follower fetch frequency
+- Monitor under-replicated partitions
+
+## Technical Interview Questions
+
+### Q1: Explain the ISR concept.
+
+**Answer:**
+In-Sync Replicas (ISR) is the set of replicas that are fully caught up with the leader. A replica is in ISR if:
+1. Offset lag ≤ threshold (default: 10 messages)
+2. Time since last fetch ≤ threshold (default: 10 seconds)
+
+ISR is dynamic - replicas are added when they catch up and removed when they lag. Only ISR replicas can become leader in a failover. Producer `acks=all` waits for all ISR replicas to acknowledge.
+
+### Q2: Why use pull-based replication instead of push?
+
+**Answer:**
+Pull-based replication has several advantages:
+1. **Follower controls rate** - prevents overwhelming slow followers
+2. **Simpler leader** - leader doesn't need to track push state
+3. **Natural backpressure** - slow followers just fetch slower
+4. **Batching** - followers can request multiple messages at once
+
+The trade-off is higher latency compared to push. Kafka, Pulsar, and our system all use pull-based replication.
+
+### Q3: How does high-water mark ensure consistency?
+
+**Answer:**
+The high-water mark (HWM) is the minimum offset replicated to all ISR replicas. Only messages below HWM are visible to consumers.
+
+This ensures:
+1. **Consistency:** All consumers see the same committed data
+2. **No uncommitted reads:** If leader fails before ISR replication, consumers never see that data
+3. **Durability:** Data below HWM is guaranteed on all ISR replicas
+
+Example: If leader is at offset 100, follower at 95, HWM is 95. Consumers can read up to offset 94.
+
+### Q4: What happens when all followers lag behind?
+
+**Answer:**
+If all followers lag beyond the threshold:
+- ISR = {Leader only}
+- `acks=0` and `acks=1` still work (writes succeed)
+- `acks=all` with `min_isr=1` works (just leader)
+- `acks=all` with `min_isr=2` **fails** (insufficient ISR)
+
+This is a **partition availability vs durability trade-off**. With `min_isr=1`, you prioritize availability. With `min_isr=2+`, you prioritize durability and may become unavailable.
+
+### Q5: How do you handle slow followers?
+
+**Answer:**
+Multi-pronged approach:
+1. **Remove from ISR** after lag threshold
+2. **Continue replication** - follower keeps fetching
+3. **Re-add to ISR** when caught up
+4. **Monitor** - alert on under-replicated partitions
+5. **Investigate** - slow disk, network, CPU?
+
+Configuration:
+- `max_replica_lag`: Offset-based threshold
+- `max_replica_lag_time_ms`: Time-based threshold
+- `min_isr`: Minimum ISR size for writes
+
+### Q6: Compare acks=0, acks=1, acks=all.
+
+**Answer:**
+
+| Mode | Wait For | Latency | Durability | Use Case |
+|------|----------|---------|------------|----------|
+| acks=0 | Nothing | Lowest | None | Metrics, logs |
+| acks=1 | Leader | Medium | Leader only | General purpose |
+| acks=all | ISR | Highest | Full ISR | Financial, critical |
+
+**Data loss scenarios:**
+- `acks=0`: Producer thinks sent, but leader crashes before write
+- `acks=1`: Leader acks, crashes before replication
+- `acks=all`: Safe if ISR > 1
+
+### Q7: How does replication affect write latency?
+
+**Answer:**
+Latency components:
+1. **Network:** Producer → Leader
+2. **Leader append:** Disk write + fsync (if enabled)
+3. **Replication:** Follower fetch + append (if `acks=all`)
+4. **Network:** Leader → Producer
+
+For `acks=all`:
+- Must wait for followers to fetch and append
+- Latency = append + follower_fetch_interval + follower_append
+- Typical: 5-10ms leader append + 500ms fetch interval = 505-510ms
+- Tuning: Decrease `fetch_interval_ms` for lower latency
+
+### Q8: What is the under-replication problem?
+
+**Answer:**
+A partition is under-replicated when ISR size < replication factor.
+
+**Causes:**
+- Follower crashed
+- Follower lagging (slow disk, network)
+- Broker overloaded
+
+**Impact:**
+- Reduced durability (fewer copies)
+- Risk of data loss if leader fails
+- May prevent writes (if `min_isr` not met)
+
+**Monitoring:**
+- Track under-replicated partition count
+- Alert if sustained > threshold
+- ReplicationMonitor tracks this
+
+### Q9: How do you prevent split-brain?
+
+**Answer:**
+Split-brain: Multiple leaders for same partition.
+
+**Prevention (not yet fully implemented):**
+1. **Leader epoch** - monotonic counter, incremented on each leader election
+2. **Controller** - single source of truth for leadership
+3. **Fencing** - reject requests from old leaders (lower epoch)
+4. **Follower validation** - followers reject fetches from non-leaders
+
+**Future implementation:**
+- Raft consensus for controller election
+- ZooKeeper/etcd for coordination
+- Epoch in every request/response
+
+### Q10: How does this compare to Kafka?
+
+**Answer:**
+
+| Aspect | Our Implementation | Kafka |
+|--------|-------------------|-------|
+| Replication | Pull-based | Pull-based |
+| ISR | Dynamic, offset + time | Dynamic, time-based |
+| HWM | Min of ISR offsets | Min of ISR offsets |
+| Acks | 0, 1, all | 0, 1, all |
+| Fetch Protocol | gRPC (planned) | Custom binary protocol |
+| Coordination | Simple controller | ZooKeeper/KRaft |
+
+**Main differences:**
+- We use gRPC (simpler), Kafka uses custom protocol (faster)
+- We have simpler controller (will upgrade to Raft)
+- Same core concepts and guarantees
+
+## Code Highlights
+
+### ISR Update Logic
+
+```python
+def update_isr(self, leader_offset: int, max_lag: int) -> bool:
+    old_isr = self.isr.copy()
+    new_isr = {self.leader_id}  # Leader always in ISR
+    
+    for broker_id, replica in self.replicas.items():
+        if broker_id == self.leader_id:
+            continue
+        
+        if replica.is_caught_up(leader_offset, max_lag):
+            new_isr.add(broker_id)
+            replica.state = ReplicaState.IN_SYNC
+        else:
+            replica.state = ReplicaState.SYNCING
+    
+    self.isr = new_isr
+    return old_isr != new_isr
+```
+
+### High-Water Mark Calculation
+
+```python
+def calculate_high_watermark(self) -> int:
+    if not self.isr:
+        return 0
+    
+    leader_replica = self.replicas.get(self.leader_id)
+    min_offset = leader_replica.log_end_offset
+    
+    # Find minimum offset among ISR replicas
+    for broker_id in self.isr:
+        if broker_id == self.leader_id:
+            continue
+        
+        if broker_id in self.replicas:
+            replica = self.replicas[broker_id]
+            min_offset = min(min_offset, replica.log_end_offset)
+    
+    self.high_watermark = min_offset
+    return self.high_watermark
+```
+
+### Acks=All Implementation
+
+```python
+async def _wait_for_isr_ack(self, request, base_offset, target_offset):
+    start_time = time.time()
+    timeout_s = request.timeout_ms / 1000
+    
+    while True:
+        hwm = await self._replica_manager.get_high_watermark(
+            request.topic, request.partition
+        )
+        
+        if hwm >= target_offset:
+            # All ISR replicas have replicated
+            return success_response
+        
+        if time.time() - start_time > timeout_s:
+            return timeout_response
+        
+        await asyncio.sleep(0.01)  # Poll interval
+```
+
+## System Properties
+
+1. **Durability:** Data replicated to all ISR before committed
+2. **Consistency:** All consumers see same committed data (via HWM)
+3. **Availability:** Writes succeed with `min_isr` met
+4. **Scalability:** Pull-based replication scales to many followers
+5. **Fault tolerance:** ISR handles follower failures gracefully
+
+## Real-World Tuning
+
+### For Low Latency (e.g., metrics)
+```python
+config = ReplicationConfig(
+    max_replica_lag=100,           # Higher lag tolerance
+    max_replica_lag_time_ms=30000, # 30s tolerance
+    min_isr=1,                     # Leader only
+    fetch_interval_ms=100,          # Fast fetch
+)
+# Use acks=0 or acks=1
+```
+
+### For High Durability (e.g., financial)
+```python
+config = ReplicationConfig(
+    max_replica_lag=5,              # Low lag tolerance
+    max_replica_lag_time_ms=5000,   # 5s tolerance
+    min_isr=3,                      # Require 3 replicas
+    fetch_interval_ms=100,          # Fast fetch
+)
+# Use acks=all
+```
+
+### For Balanced (e.g., general logs)
+```python
+config = ReplicationConfig(
+    max_replica_lag=10,
+    max_replica_lag_time_ms=10000,
+    min_isr=2,
+    fetch_interval_ms=500,
+)
+# Use acks=1 or acks=all
+```
+
+## Lessons Learned
+
+1. **ISR is dynamic** - must handle replicas joining/leaving constantly
+2. **HWM lags** - consumers always behind leader by design
+3. **Pull scales better** - follower controls its own rate
+4. **Acks trade-off** - no free lunch between latency and durability
+5. **Async crucial** - managing thousands of partitions requires async
+6. **Monitoring essential** - must track under-replication proactively
+7. **Configuration matters** - different workloads need different configs
+
+## Comparable Systems
+
+- **Kafka:** Same ISR/HWM model, pull-based replication
+- **Pulsar:** Uses BookKeeper with quorum-based replication (different model)
+- **Cassandra:** Tunable consistency (similar to acks modes)
+- **PostgreSQL:** Synchronous/asynchronous replication (similar concept)
+
+---
+
+**Document Version:** 10.0  
 **Last Updated:** January 16, 2026  
-**Next Update:** After Phase 2 (replication and consensus)
+**Next Update:** After Phase 2 (Raft consensus and failover)

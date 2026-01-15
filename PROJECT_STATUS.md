@@ -447,14 +447,22 @@ Phase 4 (Future): Production Hardening
 - PersistentGroupCoordinator with durable offsets
 - Tombstone records for offset deletion
 - Active group tracking
+- Leader-follower replication with ISR
+- Dynamic In-Sync Replicas tracking
+- High-water mark (HWM) management
+- Pull-based follower fetch protocol
+- Three acknowledgment modes (acks=0,1,all)
+- Replication lag monitoring
+- Min ISR requirement for writes
+- Under-replication detection
+- Configurable replication thresholds
 
 ### What's Next:
-- Final Phase 1 polish (Task 10: Testing and documentation)
-- Multi-broker replication (Phase 2)
-- Leader-follower pattern
+- Leader election and failover
 - Consensus algorithm (Raft)
 - Exactly-once semantics
 - Transactional writes
+- Multi-datacenter replication
 
 ### Known Issues:
 - None
@@ -526,7 +534,48 @@ Phase 4 (Future): Production Hardening
 
 ---
 
+#### Task 11: feat/leader-follower-replication (COMPLETED)
+**Completion Date:** January 16, 2026
+**Commits:** 5+ commits
+
+**Deliverables:**
+- [x] Replica management with ISR tracking
+- [x] High-water mark (HWM) calculation
+- [x] Follower fetch protocol (pull-based)
+- [x] Leader replication manager
+- [x] Acknowledgment modes (acks=0,1,all)
+- [x] Replication lag monitoring
+- [x] Replication coordinator
+- [x] Comprehensive tests (50+ test cases)
+
+**Features Implemented:**
+- ReplicaInfo with state tracking (online, offline, syncing, in_sync)
+- PartitionReplicaSet for leader-follower management
+- Dynamic ISR updates based on offset and time lag
+- High-water mark calculation (minimum ISR offset)
+- ReplicaManager with health checking
+- ReplicationFetcher for follower-side pulling
+- LeaderReplicationManager for serving fetch requests
+- AckManager with three ack modes
+- ReplicationMonitor for under-replication tracking
+- ReplicationCoordinator for become leader/follower
+- Min ISR requirement for writes
+- Configurable lag thresholds
+
+**Files Created:** 8 files, 2,200+ lines
+
+**Key Concepts Implemented:**
+- In-Sync Replicas (ISR): Dynamic set of caught-up replicas
+- High-Water Mark (HWM): Minimum offset replicated to all ISR
+- Pull-based replication: Followers fetch from leader
+- Acks=0: No wait (fire and forget)
+- Acks=1: Leader acknowledgment only
+- Acks=all: Wait for all ISR replicas
+- Configurable min_isr for availability vs durability
+
+---
+
 **Last Updated:** January 16, 2026  
-**Current Sprint:** Phase 1 COMPLETE ✅ + Phase 2 Started
-**Next Sprint:** Phase 2 - Replication (Tasks 11-15)
-**Progress:** 10/10 tasks complete in Phase 1 (100%)
+**Current Sprint:** Phase 2 - Replication and Fault Tolerance
+**Next Sprint:** Phase 2 - Consensus (Tasks 12-15)
+**Progress:** 11/15 tasks complete (73%)
