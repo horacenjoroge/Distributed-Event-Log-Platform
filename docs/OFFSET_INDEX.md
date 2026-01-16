@@ -37,7 +37,7 @@ The index samples entries at regular byte intervals (default: 4KB):
 ```
 Offset:     0    10   20   30   40   50   60   70   80   90
 Position:   0    1K   2K   3K   4K   5K   6K   7K   8K   9K
-Indexed:    ✓         ✓         ✓         ✓         ✓
+Indexed:    X         X         X         X         X
 
 To find offset 55:
 1. Binary search index → finds entry for offset 50 at position 5K

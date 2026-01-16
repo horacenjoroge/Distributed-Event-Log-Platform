@@ -558,14 +558,14 @@ with Producer(bootstrap_servers='localhost:9092') as producer:
 
 | Feature | DistributedLog Producer | Kafka Producer |
 |---------|------------------------|----------------|
-| Batching | ✅ Yes | ✅ Yes |
-| Compression | ✅ GZIP, SNAPPY, LZ4 | ✅ GZIP, SNAPPY, LZ4, ZSTD |
-| Partitioning | ✅ 5 strategies | ✅ Default + custom |
-| Retry logic | ✅ Exponential backoff | ✅ Exponential backoff |
-| Idempotence | ❌ Not yet | ✅ Yes |
-| Transactions | ❌ Not yet | ✅ Yes |
-| Async send | ✅ Yes | ✅ Yes |
-| Circuit breaker | ✅ Yes | ❌ No (manual) |
+| Batching | Yes | Yes |
+| Compression | GZIP, SNAPPY, LZ4 | GZIP, SNAPPY, LZ4, ZSTD |
+| Partitioning | 5 strategies | Default + custom |
+| Retry logic | Exponential backoff | Exponential backoff |
+| Idempotence | Not yet | Yes |
+| Transactions | Not yet | Yes |
+| Async send | Yes | Yes |
+| Circuit breaker | Yes | No (manual) |
 
 ## References
 

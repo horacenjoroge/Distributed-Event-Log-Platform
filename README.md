@@ -5,42 +5,42 @@
 
 A production-ready distributed commit log system built from scratch, implementing the principles from Kleppmann's "Designing Data-Intensive Applications."
 
-**🎯  Complete**: All 18 tasks (15 original + 3 bonuses) implemented with 38,120 lines of code.
+**Complete**: All 18 tasks (15 original + 3 bonuses) implemented with 38,120 lines of code.
 
 ---
 
-## 🚀 Features
+## Features
 
 ### **Core Features**
-- ✅ **Append-only commit log** with crash recovery
-- ✅ **Sparse offset indexing** (O(log n) lookups)
-- ✅ **Log compaction** and retention policies
-- ✅ **Producer/Consumer clients** with batching & compression
-- ✅ **Topic partitioning** for parallelism
-- ✅ **Consumer groups** with automatic rebalancing
+- **Append-only commit log** with crash recovery
+- **Sparse offset indexing** (O(log n) lookups)
+- **Log compaction** and retention policies
+- **Producer/Consumer clients** with batching & compression
+- **Topic partitioning** for parallelism
+- **Consumer groups** with automatic rebalancing
 
 ### **Distributed Systems**
-- ✅ **Multi-broker architecture** with gRPC
-- ✅ **Leader-follower replication** with ISR (In-Sync Replicas)
-- ✅ **Raft consensus** for leader election (implemented from scratch)
-- ✅ **Cluster controller** with metadata propagation
-- ✅ **Partition reassignment** (live data migration)
+- **Multi-broker architecture** with gRPC
+- **Leader-follower replication** with ISR (In-Sync Replicas)
+- **Raft consensus** for leader election (implemented from scratch)
+- **Cluster controller** with metadata propagation
+- **Partition reassignment** (live data migration)
 
 ### **Exactly-Once Semantics**
-- ✅ **Producer idempotence** (PID + sequence numbers)
-- ✅ **Distributed transactions** (two-phase commit)
-- ✅ **Consumer isolation** (READ_COMMITTED/READ_UNCOMMITTED)
-- ✅ **End-to-end exactly-once delivery**
+- **Producer idempotence** (PID + sequence numbers)
+- **Distributed transactions** (two-phase commit)
+- **Consumer isolation** (READ_COMMITTED/READ_UNCOMMITTED)
+- **End-to-end exactly-once delivery**
 
 ### **Performance Optimizations**
-- ✅ **Zero-copy transfers** (sendfile, mmap) - **3x throughput**
-- ✅ **Async I/O** (asyncio, event loop) - **10,000+ connections/thread**
-- ✅ **Buffer pooling** - 95% hit rate
-- ✅ **Adaptive batch fetching** - dynamic sizing
+- **Zero-copy transfers** (sendfile, mmap) - **3x throughput**
+- **Async I/O** (asyncio, event loop) - **10,000+ connections/thread**
+- **Buffer pooling** - 95% hit rate
+- **Adaptive batch fetching** - dynamic sizing
 
 ---
 
-## 📊 Performance Characteristics
+## Performance Characteristics
 
 | Metric | Traditional | Optimized | Improvement |
 |--------|-------------|-----------|-------------|
@@ -51,7 +51,7 @@ A production-ready distributed commit log system built from scratch, implementin
 
 ---
 
-## 🏗️ Architecture
+## Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────┐
@@ -86,7 +86,7 @@ A production-ready distributed commit log system built from scratch, implementin
 
 ---
 
-## 🚀 Quick Start
+## Quick Start
 
 ### **Prerequisites**
 ```bash
@@ -134,7 +134,7 @@ python examples/consumer_example.py --broker localhost:9092 --group my-group
 
 ---
 
-## 📖 Usage Examples
+## Usage Examples
 
 ### **Producer Example**
 
@@ -218,7 +218,7 @@ producer.commit_transaction()  # All or nothing!
 
 ---
 
-## 🧪 Testing
+## Testing
 
 ```bash
 # Run all tests
@@ -236,7 +236,7 @@ pytest tests/integration/
 
 ---
 
-## 📈 Performance Benchmarking
+## Performance Benchmarking
 
 ```bash
 # Throughput test
@@ -253,7 +253,7 @@ python benchmarks/latency_benchmark.py \
 
 ---
 
-## 🎓 Learning Resources
+## Learning Resources
 
 - **[INTERVIEW.md](INTERVIEW.md)**: 140+ interview questions with detailed answers
 - **[PROJECT_STATUS.md](PROJECT_STATUS.md)**: Complete project timeline and features
@@ -262,7 +262,7 @@ python benchmarks/latency_benchmark.py \
 
 ---
 
-## 🏆 Project Stats
+## Project Stats
 
 ```
 Production Code:  23,321 lines across 110 files
@@ -278,7 +278,7 @@ Completion:       18/15 tasks (120%)
 
 ---
 
-## 🛠️ Tech Stack
+## Tech Stack
 
 - **Language**: Python 3.10+
 - **Async I/O**: asyncio, async/await
@@ -291,7 +291,7 @@ Completion:       18/15 tasks (120%)
 
 ---
 
-## 📋 System Requirements
+## System Requirements
 
 ### **Minimum**
 - CPU: 2 cores
@@ -307,7 +307,7 @@ Completion:       18/15 tasks (120%)
 
 ---
 
-## 🔧 Configuration
+## Configuration
 
 See `distributedlog/config.py` for all configuration options:
 
@@ -333,7 +333,7 @@ COMPRESSION_TYPE = "snappy"
 
 ---
 
-## 🐛 Troubleshooting
+## Troubleshooting
 
 ### **Broker won't start**
 ```bash
@@ -361,7 +361,7 @@ python -m distributedlog.admin.describe_group --group my-group
 
 ---
 
-## 📚 Further Reading
+## Further Reading
 
 - [Designing Data-Intensive Applications](https://dataintensive.net/) by Martin Kleppmann
 - [Kafka: The Definitive Guide](https://www.confluent.io/resources/kafka-the-definitive-guide/)
@@ -370,13 +370,13 @@ python -m distributedlog.admin.describe_group --group my-group
 
 ---
 
-## 📄 License
+## License
 
 MIT License - see [LICENSE](LICENSE) file for details.
 
 ---
 
-## 👤 Author
+## Author
 
 **Horace Njoroge**
 - GitHub: [@horacenjoroge](https://github.com/horacenjoroge)
@@ -384,7 +384,7 @@ MIT License - see [LICENSE](LICENSE) file for details.
 
 ---
 
-## 🙏 Acknowledgments
+## Acknowledgments
 
 This project implements concepts from:
 - Apache Kafka
@@ -396,9 +396,9 @@ Built from scratch for learning and interview preparation - **18 tasks, 120% com
 
 ---
 
-## ⭐ Show Your Support
+## Show Your Support
 
-If this project helped you learn distributed systems, please give it a star! ⭐
+If this project helped you learn distributed systems, please give it a star!
 
 ---
 

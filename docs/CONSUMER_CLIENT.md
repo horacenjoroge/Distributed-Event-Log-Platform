@@ -507,14 +507,14 @@ consumer.close()
 
 | Feature | DistributedLog Consumer | Kafka Consumer |
 |---------|------------------------|----------------|
-| Subscribe | ✅ Yes | ✅ Yes |
-| Poll API | ✅ Yes | ✅ Yes |
-| Auto-commit | ✅ Yes | ✅ Yes |
-| Manual commit | ✅ Yes | ✅ Yes |
-| Seek operations | ✅ Yes | ✅ Yes |
-| Consumer groups | ⏳ Partial | ✅ Yes |
-| Rebalancing | ❌ Not yet | ✅ Yes |
-| Pause/resume | ❌ Not yet | ✅ Yes |
+| Subscribe | Yes | Yes |
+| Poll API | Yes | Yes |
+| Auto-commit | Yes | Yes |
+| Manual commit | Yes | Yes |
+| Seek operations | Yes | Yes |
+| Consumer groups | Partial | Yes |
+| Rebalancing | Not yet | Yes |
+| Pause/resume | Not yet | Yes |
 
 ## References
 

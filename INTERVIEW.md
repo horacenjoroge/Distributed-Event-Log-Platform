@@ -6403,7 +6403,7 @@ First message to partition 1: seq=0 (independent)
 ```
 Receive: PID=123, Partition=0, Seq=5
 Check: Last seq for (123, 0) is 4
-Accept: 5 == 4 + 1 ✓
+Accept: 5 == 4 + 1 [OK]
 Update: Last seq = 5
 ```
 
@@ -6791,7 +6791,7 @@ If original PID=123 still active → Collision
 5. Leader A crashes
 6. Follower B becomes leader (has seq=5)
 7. Producer retries seq=5 to Leader B
-8. Leader B rejects (already has seq=5) ✓
+8. Leader B rejects (already has seq=5) [OK]
 ```
 
 ### Q8: How does this integrate with consumer exactly-once?
@@ -7131,7 +7131,7 @@ Solution: Recovery
 - New coordinator reads txn log
 - Sees PREPARE_COMMIT state
 - Completes Phase 2 (send COMMIT markers)
-- Transaction committed successfully ✓
+- Transaction committed successfully [OK]
 ```
 
 **Scenario 2: Crash during Phase 1**
@@ -7316,7 +7316,7 @@ Final balance: 80 (lost update!)
 ```
 - Transaction state: PREPARE_COMMIT in log
 - Recovery: Complete Phase 2 (send COMMIT markers)
-- Result: Transaction commits successfully ✓
+- Result: Transaction commits successfully [OK]
 ```
 
 **Phase 1 is the commit point!**
@@ -7364,7 +7364,7 @@ def recover_transactions():
 3. Network glitch, producer retries with seq=0
 4. Partition A: "Already have PID=123, seq=0" → Deduplicate
 5. Commit transaction
-6. Result: Exactly one message ✓
+6. Result: Exactly one message [OK]
 ```
 
 **Idempotence + Transactions = True exactly-once!**
@@ -8838,7 +8838,7 @@ async def handle_network():
 
 ---
 
-**🎉🎉🎉 PROJECT ABSOLUTELY COMPLETE - ALL BONUSES! 🎉🎉🎉**
+**PROJECT ABSOLUTELY COMPLETE - ALL BONUSES!**
 
 **Document Version:** 17.0 (ABSOLUTE FINAL!)  
 **Last Updated:** January 16, 2026  

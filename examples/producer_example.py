@@ -51,7 +51,7 @@ def main():
         
         # Flush remaining
         producer.flush()
-        print(f"\n✅ Successfully sent {args.messages} messages!")
+        print(f"\n[OK] Successfully sent {args.messages} messages!")
     
     finally:
         producer.close()

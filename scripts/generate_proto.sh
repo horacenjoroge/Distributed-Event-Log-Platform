@@ -26,7 +26,7 @@ python -m grpc_tools.protoc \
     "$PROTO_DIR/rpc/replication_service.proto" \
     "$PROTO_DIR/rpc/consensus_service.proto"
 
-echo "✓ Protocol buffer generation complete!"
+echo "[OK] Protocol buffer generation complete!"
 echo ""
 echo "Generated files:"
 find "$PROTO_DIR" -name "*_pb2.py*" -o -name "*_pb2_grpc.py"

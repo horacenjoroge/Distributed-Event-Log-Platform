@@ -21,7 +21,7 @@ def main():
         bootstrap_servers=['localhost:9092'],
         client_id='demo-producer'
     )
-    print("✅ Producer created")
+    print("[OK] Producer created")
     
     # Create consumer
     print("\n[2] Creating consumer...")
@@ -31,7 +31,7 @@ def main():
         client_id='demo-consumer'
     )
     consumer.subscribe(['demo-topic'])
-    print("✅ Consumer created and subscribed to 'demo-topic'")
+    print("[OK] Consumer created and subscribed to 'demo-topic'")
     
     # Produce messages
     print("\n[3] Producing 10 messages...")
@@ -54,13 +54,13 @@ def main():
             )
             # Get result from future
             metadata = future.result(timeout=5.0)
-            print(f"  ✅ Sent message {i}: offset={metadata.offset}, partition={metadata.partition}")
+            print(f"  [OK] Sent message {i}: offset={metadata.offset}, partition={metadata.partition}")
         except Exception as e:
-            print(f"  ❌ Failed to send message {i}: {e}")
+            print(f"  [FAIL] Failed to send message {i}: {e}")
     
     # Flush pending messages
     producer.flush()
-    print("✅ All messages flushed")
+    print("[OK] All messages flushed")
     
     # Consume messages
     print("\n[4] Consuming messages...")
@@ -74,22 +74,22 @@ def main():
         for message in messages:
             # Deserialize
             data = json.loads(message.value.decode('utf-8'))
-            print(f"  ✅ Consumed: {data}")
+            print(f"  [OK] Consumed: {data}")
             consumed += 1
             
             if consumed >= 10:
                 break
     
     if consumed == 10:
-        print(f"\n✅ Successfully consumed all {consumed} messages!")
+        print(f"\n[OK] Successfully consumed all {consumed} messages!")
     else:
-        print(f"\n⚠️  Only consumed {consumed}/10 messages")
+        print(f"\n[WARN] Only consumed {consumed}/10 messages")
     
     # Cleanup
     print("\n[5] Cleaning up...")
     producer.close()
     consumer.close()
-    print("✅ Resources cleaned up")
+    print("[OK] Resources cleaned up")
     
     print("\n" + "=" * 60)
     print("Demo completed successfully!")
@@ -102,6 +102,6 @@ if __name__ == '__main__':
     except KeyboardInterrupt:
         print("\n\nDemo interrupted by user")
     except Exception as e:
-        print(f"\n❌ Demo failed: {e}")
+        print(f"\n[FAIL] Demo failed: {e}")
         import traceback
         traceback.print_exc()
