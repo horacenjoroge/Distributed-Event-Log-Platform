@@ -46,12 +46,14 @@ def main():
         message_bytes = json.dumps(message).encode('utf-8')
         
         try:
-            # Send message
-            metadata = producer.send(
+            # Send message (returns Future)
+            future = producer.send(
                 topic='demo-topic',
                 value=message_bytes,
                 key=f'key-{i}'.encode('utf-8')
             )
+            # Get result from future
+            metadata = future.result(timeout=5.0)
             print(f"  ✅ Sent message {i}: offset={metadata.offset}, partition={metadata.partition}")
         except Exception as e:
             print(f"  ❌ Failed to send message {i}: {e}")

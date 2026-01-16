@@ -428,7 +428,8 @@ class Producer:
         except Exception as e:
             logger.error("Error during flush on close", error=str(e))
         
-        self._executor.shutdown(wait=True, timeout=timeout_ms / 1000.0)
+        # Note: timeout parameter added in Python 3.9, removed for compatibility
+        self._executor.shutdown(wait=True)
         
         for topic_logs in self._logs.values():
             for log in topic_logs.values():
